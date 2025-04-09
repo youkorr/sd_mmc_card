@@ -125,56 +125,6 @@ void SdMmc::setup() {
 }
 #endif
 
-std::vector<FileInfo> SdMmc::list_directory_file_info(const char *path, uint8_t depth) {
-  std::vector<FileInfo> list;
-  list_directory_file_info_rec(path, depth, list);
-  return list;
-}
-
-std::vector<FileInfo> SdMmc::list_directory_file_info(std::string path, uint8_t depth) {
-  return this->list_directory_file_info(path.c_str(), depth);
-}
-
-#ifdef USE_ESP_IDF
-std::vector<FileInfo> &SdMmc::list_directory_file_info_rec(const char *path, uint8_t depth,
-                                                           std::vector<FileInfo> &list) {
-  ESP_LOGV(TAG, "Listing directory file info: %s\n", path);
-  std::string absolut_path = build_path(path);
-  DIR *dir = opendir(absolut_path.c_str());
-  if (!dir) {
-    ESP_LOGE(TAG, "Failed to open directory: %s", strerror(errno));
-    return list;
-  }
-  char entry_absolut_path[FILE_PATH_MAX];
-  char entry_path[FILE_PATH_MAX];
-  const size_t dirpath_len = MOUNT_POINT.size();
-  size_t entry_path_len = strlen(path);
-  strlcpy(entry_path, path, sizeof(entry_path));
-  strlcpy(entry_path + entry_path_len, "/", sizeof(entry_path) - entry_path_len);
-  entry_path_len = strlen(entry_path);
-
-  strlcpy(entry_absolut_path, MOUNT_POINT.c_str(), sizeof(entry_absolut_path));
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    size_t file_size = 0;
-    strlcpy(entry_path + entry_path_len, entry->d_name, sizeof(entry_path) - entry_path_len);
-    strlcpy(entry_absolut_path + dirpath_len, entry_path, sizeof(entry_absolut_path) - dirpath_len);
-    if (entry->d_type != DT_DIR) {
-      struct stat info;
-      if (stat(entry_absolut_path, &info) < 0) {
-        ESP_LOGE(TAG, "Failed to stat file: %s '%s' %s", strerror(errno), entry->d_name, entry_absolut_path);
-      } else {
-        file_size = info.st_size;
-      }
-    }
-    list.emplace_back(entry_path, file_size, entry->d_type == DT_DIR);
-    if (entry->d_type == DT_DIR && depth)
-      list_directory_file_info_rec(entry_absolut_path, depth - 1, list);
-  }
-  closedir(dir);
-  return list;
-}
-
 size_t SdMmc::file_size(const char *path) {
   std::string absolut_path = build_path(path);
   struct stat info;
@@ -227,6 +177,7 @@ void SdMmc::update_sensors() {
       sensor.sensor->publish_state(this->file_size(sensor.path));
   }
 #endif
+}
 
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
 
@@ -269,11 +220,9 @@ long double convertBytes(uint64_t value, MemoryUnits unit) {
   return value * 1.0 / pow(1024, static_cast<uint64_t>(unit));
 }
 
-FileInfo::FileInfo(std::string const &path, size_t size, bool is_directory)
-    : path(path), size(size), is_directory(is_directory) {}
-
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
 
 
 
