@@ -28,14 +28,6 @@ struct FileSizeSensor {
 };
 #endif
 
-struct FileInfo {
-  std::string path;
-  size_t size;
-  bool is_directory;
-
-  FileInfo(std::string const &, size_t, bool);
-};
-
 class SdMmc : public Component {
 #ifdef USE_SENSOR
   SUB_SENSOR(used_space)
@@ -54,8 +46,6 @@ class SdMmc : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  std::vector<FileInfo> list_directory_file_info(const char *path, uint8_t depth);
-  std::vector<FileInfo> list_directory_file_info(std::string path, uint8_t depth);
   size_t file_size(const char *path);
   size_t file_size(std::string const &path);
 #ifdef USE_SENSOR
@@ -93,7 +83,6 @@ class SdMmc : public Component {
 #ifdef USE_ESP_IDF
   std::string sd_card_type() const;
 #endif
-  std::vector<FileInfo> &list_directory_file_info_rec(const char *path, uint8_t depth, std::vector<FileInfo> &list);
   static std::string error_code_to_string(ErrorCode);
 };
 
@@ -101,4 +90,5 @@ long double convertBytes(uint64_t, MemoryUnits);
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
 
