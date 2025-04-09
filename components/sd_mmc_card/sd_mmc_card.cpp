@@ -124,6 +124,7 @@ void SdMmc::setup() {
   update_sensors();
 }
 #endif
+
 std::vector<FileInfo> SdMmc::list_directory_file_info(const char *path, uint8_t depth) {
   std::vector<FileInfo> list;
   list_directory_file_info_rec(path, depth, list);
@@ -226,7 +227,6 @@ void SdMmc::update_sensors() {
       sensor.sensor->publish_state(this->file_size(sensor.path));
   }
 #endif
-}
 
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
 
@@ -274,5 +274,6 @@ FileInfo::FileInfo(std::string const &path, size_t size, bool is_directory)
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
 
 
