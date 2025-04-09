@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome import automation, pins
+from esphome import pins
 from esphome.const import (
     CONF_ID,
     CONF_DATA,
@@ -24,13 +24,6 @@ CONF_POWER_CTRL_PIN = "power_ctrl_pin"
 
 sd_mmc_card_component_ns = cg.esphome_ns.namespace("sd_mmc_card")
 SdMmc = sd_mmc_card_component_ns.class_("SdMmc", cg.Component)
-
-# Action
-SdMmcWriteFileAction = sd_mmc_card_component_ns.class_("SdMmcWriteFileAction", automation.Action)
-SdMmcAppendFileAction = sd_mmc_card_component_ns.class_("SdMmcAppendFileAction", automation.Action)
-SdMmcCreateDirectoryAction = sd_mmc_card_component_ns.class_("SdMmcCreateDirectoryAction", automation.Action)
-SdMmcRemoveDirectoryAction = sd_mmc_card_component_ns.class_("SdMmcRemoveDirectoryAction", automation.Action)
-SdMmcDeleteFileAction = sd_mmc_card_component_ns.class_("SdMmcDeleteFileAction", automation.Action)
 
 def validate_raw_data(value):
     if isinstance(value, str):
@@ -59,7 +52,6 @@ CONFIG_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -77,79 +69,5 @@ async def to_code(config):
 
     if (CONF_POWER_CTRL_PIN in config):
         power_ctrl = await cg.gpio_pin_expression(config[CONF_POWER_CTRL_PIN])
-        cg.add(var.set_power_ctrl_pin(power_ctrl));
+        cg.add(var.set_power_ctrl_pin(power_ctrl))
 
-
-
-SD_MMC_PATH_ACTION_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.use_id(SdMmc),
-        cv.Required(CONF_PATH): cv.templatable(cv.string_strict),
-    }
-)
-
-SD_MMC_WRITE_FILE_ACTION_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.use_id(SdMmc),
-        cv.Required(CONF_PATH): cv.templatable(cv.string_strict),
-        cv.Required(CONF_DATA): cv.templatable(validate_raw_data),
-    }
-).extend(SD_MMC_PATH_ACTION_SCHEMA)
-
-@automation.register_action(
-    "sd_mmc_card.write_file", SdMmcWriteFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA
-)
-async def sd_mmc_write_file_to_code(config, action_id, template_arg, args):
-    parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    path_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    data_ = await cg.templatable(config[CONF_DATA], args, cg.std_vector.template(cg.uint8))
-    cg.add(var.set_path(path_))
-    cg.add(var.set_data(data_))
-    return var
-
-
-@automation.register_action(
-    "sd_mmc_card.append_file", SdMmcAppendFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA
-)
-async def sd_mmc_append_file_to_code(config, action_id, template_arg, args):
-    parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    path_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    data_ = await cg.templatable(config[CONF_DATA], args, cg.std_vector.template(cg.uint8))
-    cg.add(var.set_path(path_))
-    cg.add(var.set_data(data_))
-    return var
-
-
-@automation.register_action(
-    "sd_mmc_card.create_directory", SdMmcCreateDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA
-)
-async def sd_mmc_create_directory_to_code(config, action_id, template_arg, args):
-    parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    path_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    cg.add(var.set_path(path_))
-    return var
-
-
-@automation.register_action(
-    "sd_mmc_card.remove_directory", SdMmcRemoveDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA
-)
-async def sd_mmc_remove_directory_to_code(config, action_id, template_arg, args):
-    parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    path_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    cg.add(var.set_path(path_))
-    return var
-
-
-@automation.register_action(
-    "sd_mmc_card.delete_file", SdMmcDeleteFileAction, SD_MMC_PATH_ACTION_SCHEMA
-)
-async def sd_mmc_delete_file_to_code(config, action_id, template_arg, args):
-    parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    path_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    cg.add(var.set_path(path_))
-    return var
