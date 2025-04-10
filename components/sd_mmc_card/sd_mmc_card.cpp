@@ -88,6 +88,7 @@ void SdMmc::setup() {
 
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.max_freq_khz = 40000;  // Limite la fréquence à 40 MHz
+  host.flags &= ~SDMMC_HOST_FLAG_DDR;  // ⛔ Désactiver DDR (par défaut il peut être actif si le matériel le permet)
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
   if (this->mode_1bit_) {
