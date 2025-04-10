@@ -13,6 +13,8 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_types.h"
+#include "freertos/FreeRTOS.h"   // Ajout pour vTaskDelay
+#include "freertos/task.h"       // Ajout pour vTaskDelay
 
 // Constantes d'optimisation pour les transferts
 #define SD_DMA_MODE true
@@ -88,7 +90,8 @@ void SdMmc::setup() {
     this->power_ctrl_pin_->setup();
     // Assurez-vous que la carte est alimentée
     this->power_ctrl_pin_->digital_write(true);
-    delay(100); // Attendre que la carte s'initialise
+    // Utiliser vTaskDelay au lieu de delay
+    vTaskDelay(pdMS_TO_TICKS(100)); // Attendre que la carte s'initialise
   }
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
