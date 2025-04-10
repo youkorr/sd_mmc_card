@@ -6,6 +6,7 @@
 
 #include "math.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h" // Include this for delay function
 
 #ifdef USE_ESP_IDF
 #include "esp_vfs.h"
@@ -96,7 +97,7 @@ void SdMmc::setup() {
     
     // Attendre que l'alimentation se stabilise
     ESP_LOGI(TAG, "Waiting for power stabilization (%dms)...", SD_POWER_STABILIZATION_DELAY);
-    delay(SD_POWER_STABILIZATION_DELAY);
+    esphome::delay(SD_POWER_STABILIZATION_DELAY);
     ESP_LOGI(TAG, "Power stabilization complete");
   }
 
@@ -180,7 +181,7 @@ void SdMmc::setup() {
     esp_err_t ret = sdmmc_host_set_card_clk(host.slot, 25000);
     if (ret == ESP_OK) {
       ESP_LOGI(TAG, "Successfully set to 25MHz, waiting for stabilization");
-      delay(50);  // Attendre la stabilisation
+      esphome::delay(50);  // Attendre la stabilisation
       
       // Deuxième étape à vitesse maximale
       ESP_LOGI(TAG, "Stepping up to high speed mode (40MHz)...");
@@ -327,7 +328,7 @@ bool SdMmc::read_file_chunked(const char *path,
   fseek(f, offset, SEEK_SET);
   
   // Allouer un buffer pour la lecture par chunks
-  uint8_t buffer = (uint8_t)malloc(chunk_size);
+  uint8_t* buffer = (uint8_t*)malloc(chunk_size);
   if (buffer == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate read buffer");
     fclose(f);
@@ -412,6 +413,5 @@ long double convertBytes(uint64_t value, MemoryUnits unit) {
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
-
 
 
