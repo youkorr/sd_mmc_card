@@ -4,7 +4,7 @@
 #include <netdb.h>
 #include <cstring>
 #include <arpa/inet.h>
-#include <esp_task_wdt.h>  // <- Ajouté pour le Watchdog
+#include "esp_task_wdt.h"
 
 static const char *TAG = "ftp_proxy";
 
@@ -13,16 +13,8 @@ namespace ftp_http_proxy {
 
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
-
-  // Initialisation du watchdog (WDT)
-  esp_task_wdt_config_t wdt_config = {
-      .timeout_ms = 500000,
-      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-      .trigger_panic = true
-  };
-  esp_task_wdt_init(&wdt_config);
-  esp_task_wdt_add(NULL);  // Ajouter la tâche principale (loop)
-
+  esp_task_wdt_init(30);  // Timeout de 30 secondes
+  esp_task_wdt_add(NULL); // Ajout de la tâche courante au WDT
   this->setup_http_server();
 }
 
@@ -67,14 +59,17 @@ bool FTPHTTPProxy::connect_to_ftp() {
   snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
   recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  esp_task_wdt_reset();
 
   snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
   recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  esp_task_wdt_reset();
 
   // Mode binaire
   send(sock_, "TYPE I\r\n", 8, 0);
   recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  esp_task_wdt_reset();
 
   return true;
 }
@@ -97,6 +92,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
     goto error;
   }
+  esp_task_wdt_reset();
 
   pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
@@ -115,9 +111,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   memset(&data_addr, 0, sizeof(data_addr));
   data_addr.sin_family = AF_INET;
   data_addr.sin_port = htons(data_port);
-  data_addr.sin_addr.s_addr = htonl(
-      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
-  );
+  data_addr.sin_addr.s_addr = htonl((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]);
 
   if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
     goto error;
@@ -131,12 +125,10 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     goto error;
   }
 
-  // Boucle avec reset du WDT à chaque itération
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) break;
 
-    // Nourrir le WDT pour éviter reset
     esp_task_wdt_reset();
 
     if (httpd_resp_send_chunk(req, buffer, bytes_received) != ESP_OK) {
