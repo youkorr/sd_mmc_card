@@ -79,7 +79,6 @@ class SdMmc : public Component {
   uint8_t data2_pin_;
   uint8_t data3_pin_;
   bool mode_1bit_;
-  bool high_speed_mode_{true};  // Add the missing member variable
   GPIOPin *power_ctrl_pin_{nullptr};
 
 #ifdef USE_ESP_IDF
