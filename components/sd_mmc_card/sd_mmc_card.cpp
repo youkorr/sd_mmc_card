@@ -94,8 +94,6 @@ void SdMmc::setup() {
     // Assurez-vous que la carte est alimentée
     this->power_ctrl_pin_->digital_write(true);
     // Utiliser delay standard au lieu de vTaskDelay
-    delay(100); // Attendre que la carte s'initialise
-    ESP_LOGI(TAG, "Power control pin set, waited 100ms for initialization");
   }
 
   ESP_LOGI(TAG, "Configuring mount settings");
