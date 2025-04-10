@@ -8,17 +8,35 @@
 
 static const char *TAG = "ftp_proxy";
 
+// Taille du buffer optimisée pour les transferts
+#define DOWNLOAD_BUFFER_SIZE 4096
+// Nombre maximal d'octets à transférer avant de réinitialiser le WDT
+#define WDT_RESET_THRESHOLD (1024 * 512) // 512 KB
+
 namespace esphome {
 namespace ftp_http_proxy {
 
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
-  esp_task_wdt_init(30);  // Timeout de 30 secondes
-  esp_task_wdt_add(NULL); // Ajout de la tâche courante au WDT
+  
+  // Configuration du WDT avec un délai plus long pour les gros fichiers
+  esp_task_wdt_init(60);  // Timeout de 60 secondes au lieu de 30
+  
+  // Obtention du handle de la tâche courante
+  TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  
+  // Enregistrement de la tâche avec le handle spécifique
+  esp_task_wdt_add(current_task);
+  
+  ESP_LOGI(TAG, "Task Watchdog configuré pour la tâche principale");
+  
   this->setup_http_server();
 }
 
-void FTPHTTPProxy::loop() {}
+void FTPHTTPProxy::loop() {
+  // Réinitialiser périodiquement le WDT dans la boucle principale
+  esp_task_wdt_reset();
+}
 
 bool FTPHTTPProxy::connect_to_ftp() {
   struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
@@ -55,6 +73,9 @@ bool FTPHTTPProxy::connect_to_ftp() {
     return false;
   }
 
+  // Réinitialisation du watchdog avant l'authentification
+  esp_task_wdt_reset();
+
   // Authentification
   snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
@@ -80,12 +101,19 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[1024];
+  char buffer[DOWNLOAD_BUFFER_SIZE];  // Buffer plus grand pour améliorer les performances
   int bytes_received;
+  size_t total_transferred = 0;
 
   if (!connect_to_ftp()) {
     goto error;
   }
+
+  // Configuration des timeouts pour les sockets
+  struct timeval timeout;
+  timeout.tv_sec = 10;
+  timeout.tv_usec = 0;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
   send(sock_, "PASV\r\n", 6, 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
@@ -107,6 +135,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     goto error;
   }
 
+  // Configuration du timeout pour le socket de données
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
   data_addr.sin_family = AF_INET;
@@ -117,6 +148,21 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     goto error;
   }
 
+  // Définir l'en-tête Content-Type pour MP3 ou autres fichiers si nécessaire
+  const char *ext = strrchr(remote_path.c_str(), '.');
+  if (ext) {
+    if (strcmp(ext, ".mp3") == 0) {
+      httpd_resp_set_type(req, "audio/mpeg");
+    } else if (strcmp(ext, ".pdf") == 0) {
+      httpd_resp_set_type(req, "application/pdf");
+    } else if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) {
+      httpd_resp_set_type(req, "image/jpeg");
+    } else if (strcmp(ext, ".png") == 0) {
+      httpd_resp_set_type(req, "image/png");
+    }
+    // Ajouter d'autres types selon les besoins
+  }
+
   snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
   send(sock_, buffer, strlen(buffer), 0);
 
@@ -124,22 +170,38 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
     goto error;
   }
+  
+  ESP_LOGI(TAG, "Début du téléchargement de %s", remote_path.c_str());
+  
+  // Réinitialiser le watchdog avant de commencer le transfert de données
+  esp_task_wdt_reset();
 
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) break;
 
-    esp_task_wdt_reset();
+    total_transferred += bytes_received;
+    
+    // Réinitialisation périodique du WDT pendant le téléchargement
+    if (total_transferred >= WDT_RESET_THRESHOLD) {
+      ESP_LOGD(TAG, "Transfert en cours: %zu octets", total_transferred);
+      esp_task_wdt_reset();
+      total_transferred = 0; // Réinitialiser le compteur
+    }
 
     if (httpd_resp_send_chunk(req, buffer, bytes_received) != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client");
+      ESP_LOGE(TAG, "Échec d'envoi au client: %d", errno);
       break;
     }
   }
 
+  // Réinitialiser le watchdog après le transfert complet
+  esp_task_wdt_reset();
+
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received > 0 && strstr(buffer, "226 ")) {
     success = true;
+    ESP_LOGI(TAG, "Téléchargement terminé avec succès");
   }
 
   ::close(data_sock);
@@ -151,6 +213,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   return success;
 
 error:
+  ESP_LOGE(TAG, "Erreur lors du téléchargement");
   if (data_sock != -1) ::close(data_sock);
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
@@ -168,10 +231,12 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     requested_path.erase(0, 1);
   }
 
-  httpd_resp_set_type(req, "text/plain");
+  // Réinitialisation du watchdog au début de chaque requête HTTP
+  esp_task_wdt_reset();
 
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
+      ESP_LOGI(TAG, "Téléchargement demandé: %s", requested_path.c_str());
       if (proxy->download_file(configured_path, req)) {
         return ESP_OK;
       } else {
@@ -189,7 +254,12 @@ void FTPHTTPProxy::setup_http_server() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = local_port_;
   config.uri_match_fn = httpd_uri_match_wildcard;
-
+  
+  // Augmenter la taille maximale des données de la requête HTTP
+  config.max_resp_headers = 16;
+  config.max_uri_handlers = 8;
+  config.stack_size = 8192;  // Augmenter la taille de la pile
+  
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
     return;
