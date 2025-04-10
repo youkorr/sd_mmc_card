@@ -9,7 +9,7 @@
 static const char *TAG = "ftp_proxy";
 
 // Taille du buffer optimisée pour les transferts
-#define DOWNLOAD_BUFFER_SIZE 4096
+#define DOWNLOAD_BUFFER_SIZE 8192
 // Nombre maximal d'octets à transférer avant de réinitialiser le WDT
 #define WDT_RESET_THRESHOLD (1024 * 512) // 512 KB
 
