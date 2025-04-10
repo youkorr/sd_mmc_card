@@ -13,8 +13,16 @@ namespace ftp_http_proxy {
 
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
-  esp_task_wdt_init(30);  // Timeout de 30 secondes
-  esp_task_wdt_add(NULL); // Ajout de la tâche courante au WDT
+
+  // Configuration correcte du Watchdog (60 sec)
+  const esp_task_wdt_config_t twdt_config = {
+      .timeout_ms = 60000,
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .trigger_panic = true,
+  };
+  esp_task_wdt_init(&twdt_config);
+  esp_task_wdt_add(NULL);  // Ajoute la tâche courante (loopTask) au WDT
+
   this->setup_http_server();
 }
 
