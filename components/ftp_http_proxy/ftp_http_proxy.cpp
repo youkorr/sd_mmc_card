@@ -16,7 +16,7 @@ void FTPHTTPProxy::setup() {
 
   // Initialisation du watchdog (WDT)
   esp_task_wdt_config_t wdt_config = {
-      .timeout_ms = 30000,
+      .timeout_ms = 500000,
       .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
       .trigger_panic = true
   };
