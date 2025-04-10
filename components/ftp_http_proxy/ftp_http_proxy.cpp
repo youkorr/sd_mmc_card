@@ -4,6 +4,7 @@
 #include <netdb.h>
 #include <cstring>
 #include <arpa/inet.h>
+#include <esp_task_wdt.h>  // <- Ajouté pour le Watchdog
 
 static const char *TAG = "ftp_proxy";
 
@@ -12,6 +13,11 @@ namespace ftp_http_proxy {
 
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
+
+  // Init watchdog pour loopTask (optionnel, augmente le timeout à 30s)
+  esp_task_wdt_init(30, true);  // Timeout de 30 secondes, reset automatique
+  esp_task_wdt_add(NULL);       // Ajoute loopTask au WDT
+
   this->setup_http_server();
 }
 
@@ -69,28 +75,24 @@ bool FTPHTTPProxy::connect_to_ftp() {
 }
 
 bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
-  // Déclarations en haut pour éviter les goto cross-initialization
   int data_sock = -1;
   bool success = false;
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[1024]; // Tampon de 1ko pour réception
+  char buffer[1024];
   int bytes_received;
 
-  // Connexion au serveur FTP
   if (!connect_to_ftp()) {
     goto error;
   }
 
-  // Mode passif
   send(sock_, "PASV\r\n", 6, 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
     goto error;
   }
 
-  // Extraction des données de connexion
   pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
     goto error;
@@ -99,7 +101,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
   data_port = port[0] * 256 + port[1];
 
-  // Création du socket de données
   data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (data_sock < 0) {
     goto error;
@@ -117,20 +118,21 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     goto error;
   }
 
-  // Envoi de la commande RETR
   snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
   send(sock_, buffer, strlen(buffer), 0);
 
-  // Vérification de la réponse 150
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
     goto error;
   }
 
-  // Transfert en streaming
+  // Boucle avec reset du WDT à chaque itération
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) break;
+
+    // Nourrir le WDT pour éviter reset
+    esp_task_wdt_reset();
 
     if (httpd_resp_send_chunk(req, buffer, bytes_received) != ESP_OK) {
       ESP_LOGE(TAG, "Échec d'envoi au client");
@@ -138,19 +140,16 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     }
   }
 
-  // Vérification de la réponse finale 226
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received > 0 && strstr(buffer, "226 ")) {
     success = true;
   }
 
-  // Fermeture des sockets
   ::close(data_sock);
   send(sock_, "QUIT\r\n", 6, 0);
   ::close(sock_);
   sock_ = -1;
 
-  // Envoi du chunk final
   httpd_resp_send_chunk(req, NULL, 0);
   return success;
 
@@ -168,16 +167,11 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   std::string requested_path = req->uri;
 
-  // Suppression du premier slash
   if (!requested_path.empty() && requested_path[0] == '/') {
     requested_path.erase(0, 1);
   }
 
-  // Configuration du transfert par lots
   httpd_resp_set_type(req, "text/plain");
-  
-  // La fonction httpd_resp_set_send_chunked n'existe pas
-  // On utilise directement httpd_resp_send_chunk à la place
 
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
@@ -217,3 +211,4 @@ void FTPHTTPProxy::setup_http_server() {
 
 }  // namespace ftp_http_proxy
 }  // namespace esphome
+
