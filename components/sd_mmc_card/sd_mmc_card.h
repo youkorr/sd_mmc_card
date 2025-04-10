@@ -60,15 +60,6 @@ class SdMmc : public Component {
   void set_data3_pin(uint8_t);
   void set_mode_1bit(bool);
   void set_power_ctrl_pin(GPIOPin *);
-  
-  // Add the new high_speed_mode methods
-  void set_high_speed_mode(bool b);
-  bool get_high_speed_mode() const;
-
-  // Add the optimized read methods
-  bool read_file(const char *path, uint8_t *buffer, size_t &size, size_t offset = 0);
-  bool read_file_chunked(const char *path, std::function<bool(const uint8_t*, size_t)> data_callback, 
-                        size_t chunk_size = 4096, size_t offset = 0);
 
  protected:
   ErrorCode init_error_;
@@ -79,7 +70,6 @@ class SdMmc : public Component {
   uint8_t data2_pin_;
   uint8_t data3_pin_;
   bool mode_1bit_;
-  bool high_speed_mode_{true};
   GPIOPin *power_ctrl_pin_{nullptr};
 
 #ifdef USE_ESP_IDF
@@ -100,6 +90,8 @@ long double convertBytes(uint64_t, MemoryUnits);
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
+
 
 
 
