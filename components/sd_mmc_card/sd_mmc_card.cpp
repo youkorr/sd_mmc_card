@@ -74,7 +74,7 @@ void SdMmc::dump_config() {
 void SdMmc::setup() {
   // Enable SDCard power if power control pin is configured
   if (this->power_ctrl_pin_ != nullptr) {
-    gpio_num_t power_gpio = static_cast<gpio_num_t>(this->power_ctrl_pin_->get_number());
+    gpio_num_t power_gpio = static_cast<gpio_num_t>(this->power_ctrl_pin_->get_gpio());
     
     // Configure GPIO as output using direct ESP-IDF API
     gpio_config_t gpio_cfg = {
