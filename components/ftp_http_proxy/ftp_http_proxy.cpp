@@ -70,14 +70,9 @@ bool FTPHTTPProxy::connect_to_ftp() {
     return false;
   }
 
-  std::stringstream response_stream;
   char buffer[256];
   int bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
-  if (bytes_received <= 0 || !strstr(response_stream.str().c_str(), "220 ")) {
+  if (bytes_received <= 0 || !strstr(buffer, "220 ")) {
     ESP_LOGE(TAG, "Message de bienvenue FTP non reçu");
     ::close(sock_);
     sock_ = -1;
@@ -88,40 +83,19 @@ bool FTPHTTPProxy::connect_to_ftp() {
   esp_task_wdt_reset();
 
   // Authentification
-  std::stringstream command_stream;
-  command_stream << "USER " << username_ << "\r\n";
-  std::string command = command_stream.str();
-  send(sock_, command.c_str(), command.length(), 0);
-
-  response_stream.str("");  // Clear the stream
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
+  snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  recv(sock_, buffer, sizeof(buffer) - 1, 0);
   esp_task_wdt_reset();
 
-  command_stream.str("");
-  command_stream << "PASS " << password_ << "\r\n";
-  command = command_stream.str();
-  send(sock_, command.c_str(), command.length(), 0);
-
-  response_stream.str("");  // Clear the stream
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
+  snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  recv(sock_, buffer, sizeof(buffer) - 1, 0);
   esp_task_wdt_reset();
 
   // Mode binaire
   send(sock_, "TYPE I\r\n", 8, 0);
-  response_stream.str("");  // Clear the stream
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
+  recv(sock_, buffer, sizeof(buffer) - 1, 0);
   esp_task_wdt_reset();
 
   return true;
@@ -137,7 +111,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int bytes_received;
   size_t total_transferred = 0;
   const char *ext = nullptr;
-  std::stringstream response_stream;
+  std::stringstream retr_stream;
+  std::string retr_command;
+  const char *file_extension = nullptr;
 
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion au serveur FTP");
@@ -151,19 +127,14 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
   send(sock_, "PASV\r\n", 6, 0);
-  response_stream.str("");  // Clear the stream
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
-  if (bytes_received <= 0 || !strstr(response_stream.str().c_str(), "227 ")) {
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
     ESP_LOGE(TAG, "Échec de passage en mode passif");
     goto cleanup;
   }
   esp_task_wdt_reset();
 
-  pasv_start = strchr(response_stream.str().c_str(), '(');
+  pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
     ESP_LOGE(TAG, "Format de réponse PASV invalide");
     goto cleanup;
@@ -193,31 +164,25 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   }
 
   // Définir l'en-tête Content-Type pour MP3 ou autres fichiers si nécessaire
-  const char *file_extension = strrchr(remote_path.c_str(), '.');
-    if (file_extension != nullptr) {
-        if (strcmp(file_extension, ".mp3") == 0) {
-            httpd_resp_set_type(req, "audio/mpeg");
-        } else if (strcmp(file_extension, ".pdf") == 0) {
-            httpd_resp_set_type(req, "application/pdf");
-        } else if (strcmp(file_extension, ".jpg") == 0 || strcmp(file_extension, ".jpeg") == 0) {
-            httpd_resp_set_type(req, "image/jpeg");
-        } else if (strcmp(file_extension, ".png") == 0) {
-            httpd_resp_set_type(req, "image/png");
-        }
+  file_extension = strrchr(remote_path.c_str(), '.');
+  if (file_extension != nullptr) {
+    if (strcmp(file_extension, ".mp3") == 0) {
+      httpd_resp_set_type(req, "audio/mpeg");
+    } else if (strcmp(file_extension, ".pdf") == 0) {
+      httpd_resp_set_type(req, "application/pdf");
+    } else if (strcmp(file_extension, ".jpg") == 0 || strcmp(file_extension, ".jpeg") == 0) {
+      httpd_resp_set_type(req, "image/jpeg");
+    } else if (strcmp(file_extension, ".png") == 0) {
+      httpd_resp_set_type(req, "image/png");
     }
+  }
 
-  std::stringstream retr_stream;
   retr_stream << "RETR " << remote_path << "\r\n";
-  std::string retr_command = retr_stream.str();
+  retr_command = retr_stream.str();
   send(sock_, retr_command.c_str(), retr_command.length(), 0);
 
-  response_stream.str("");  // Clear the stream
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
-  if (bytes_received <= 0 || !strstr(response_stream.str().c_str(), "150 ")) {
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
     ESP_LOGE(TAG, "Échec de la commande RETR");
     goto cleanup;
   }
@@ -249,13 +214,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   // Réinitialiser le watchdog après le transfert complet
   esp_task_wdt_reset();
 
-  response_stream.str("");  // Clear the stream
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-    response_stream << buffer;
-  }
-  if (bytes_received > 0 && strstr(response_stream.str().c_str(), "226 ")) {
+  if (bytes_received > 0 && strstr(buffer, "226 ")) {
     success = true;
     ESP_LOGI(TAG, "Téléchargement terminé avec succès");
   }
@@ -334,6 +294,7 @@ void FTPHTTPProxy::setup_http_server() {
 
 }  // namespace ftp_http_proxy
 }  // namespace esphome
+
 
 
 
