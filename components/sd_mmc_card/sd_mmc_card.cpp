@@ -77,7 +77,9 @@ void SdMmc::setup() {
     this->power_ctrl_pin_->setup();
     
   }
-
+    // Declare max_files here with a default value
+  size_t max_files = 16; // or any other appropriate value
+  
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
       .format_if_mount_failed = false, 
       .max_files = max_files, 
