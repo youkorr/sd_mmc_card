@@ -17,7 +17,7 @@
 #include "freertos/task.h"
 
 // Constantes d'optimisation pour les transferts - ajustées pour stabilité
-#define SD_DMA_MODE false  // Désactivé par défaut pour assurer la compatibilité
+
 #define SD_FREQ_HIGH_SPEED SDMMC_FREQ_HIGHSPEED // 40MHz pour SDHC/SDXC
 #define SD_FREQ_DEFAULT SDMMC_FREQ_DEFAULT // 20MHz pour SDSC
 #define SD_FILE_BUFFER_SIZE 16384 // 16KB
@@ -57,7 +57,7 @@ void SdMmc::dump_config() {
     ESP_LOGCONFIG(TAG, "  DATA2 Pin: %d", this->data2_pin_);
     ESP_LOGCONFIG(TAG, "  DATA3 Pin: %d", this->data3_pin_);
   }
-  ESP_LOGCONFIG(TAG, "  DMA Mode: %s", SD_DMA_MODE ? "Enabled" : "Disabled");
+  
   ESP_LOGCONFIG(TAG, "  High Speed Mode: %s", this->high_speed_mode_ ? "Enabled" : "Disabled");
   ESP_LOGCONFIG(TAG, "  Frequency: %d MHz", this->high_speed_mode_ ? 40 : 20);
 
