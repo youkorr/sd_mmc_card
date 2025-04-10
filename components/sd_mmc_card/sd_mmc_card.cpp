@@ -56,8 +56,10 @@ void SdMmc::dump_config() {
     ESP_LOGCONFIG(TAG, "  DATA3 Pin: %d", this->data3_pin_);
   }
   ESP_LOGCONFIG(TAG, "  DMA Mode: %s", SD_DMA_MODE ? "Enabled" : "Disabled");
-  ESP_LOGCONFIG(TAG, "  High Speed Mode: %s", this->high_speed_mode_ ? "Enabled" : "Disabled");
-  ESP_LOGCONFIG(TAG, "  Frequency: %d MHz", this->high_speed_mode_ ? 40 : 20);
+  
+  // Fix high_speed_mode_ references
+  ESP_LOGCONFIG(TAG, "  High Speed Mode: %s", this->get_high_speed_mode() ? "Enabled" : "Disabled");
+  ESP_LOGCONFIG(TAG, "  Frequency: %d MHz", this->get_high_speed_mode() ? 40 : 20);
 
   if (this->power_ctrl_pin_ != nullptr) {
     LOG_PIN("  Power Ctrl Pin: ", this->power_ctrl_pin_);
@@ -88,7 +90,8 @@ void SdMmc::setup() {
     this->power_ctrl_pin_->setup();
     // Assurez-vous que la carte est alimentée
     this->power_ctrl_pin_->digital_write(true);
-    delay(100); // Attendre que la carte s'initialise
+    // Fix: use esphome::delay instead of delay
+    esphome::delay(100); // Attendre que la carte s'initialise
   }
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -101,7 +104,8 @@ void SdMmc::setup() {
   // Activer le DMA pour de meilleures performances
   host.flags = SDMMC_HOST_FLAG_4BIT;
   if (SD_DMA_MODE) {
-    host.flags |= SDMMC_HOST_FLAG_DMA;
+    // Fix: use SPI_DMA_CH_AUTO instead of SDMMC_HOST_FLAG_DMA
+    host.max_freq_khz = get_high_speed_mode() ? SD_FREQ_HIGH_SPEED : SD_FREQ_DEFAULT;
   }
   
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -145,10 +149,10 @@ void SdMmc::setup() {
 
   // Déterminer si la carte est SDHC/SDXC et si elle peut fonctionner en mode haute vitesse
   bool is_high_cap = (this->card_->ocr & SD_OCR_SDHC_CAP) ? true : false;
-  this->high_speed_mode_ = is_high_cap;
+  this->set_high_speed_mode(is_high_cap);
   
   // Configurer la fréquence en fonction du type de carte
-  if (is_high_cap && this->high_speed_mode_) {
+  if (is_high_cap && this->get_high_speed_mode()) {
     ESP_LOGI(TAG, "Setting high speed mode for SDHC/SDXC card");
     sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
   }
@@ -157,7 +161,7 @@ void SdMmc::setup() {
   ESP_LOGI(TAG, "Card info:");
   ESP_LOGI(TAG, "  Name: %s", this->card_->cid.name);
   ESP_LOGI(TAG, "  Type: %s", this->sd_card_type().c_str());
-  ESP_LOGI(TAG, "  Speed: %s", this->high_speed_mode_ ? "High Speed" : "Normal Speed");
+  ESP_LOGI(TAG, "  Speed: %s", this->get_high_speed_mode() ? "High Speed" : "Normal Speed");
   ESP_LOGI(TAG, "  Size: %lluMB", this->card_->csd.capacity / (1024));
   ESP_LOGI(TAG, "  CSD: ver=%d, sector_size=%d, capacity=%lld, read_bl_len=%d",
            this->card_->csd.csd_ver,
@@ -227,97 +231,6 @@ void SdMmc::update_sensors() {
 #endif
 }
 
-// Nouvelle méthode optimisée pour la lecture de fichiers
-bool SdMmc::read_file_optimized(const char *path, uint8_t *buffer, size_t &size, size_t offset) {
-  std::string full_path = build_path(path);
-  FILE *f = fopen(full_path.c_str(), "rb");
-  if (f == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file %s for reading: %s", path, strerror(errno));
-    return false;
-  }
-
-  // Positionnement au point de départ demandé
-  if (fseek(f, offset, SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek in file %s: %s", path, strerror(errno));
-    fclose(f);
-    return false;
-  }
-
-  // Lecture optimisée
-  size_t bytes_read = fread(buffer, 1, size, f);
-  fclose(f);
-
-  if (bytes_read != size) {
-    // C'est normal si on atteint la fin du fichier
-    if (feof(f)) {
-      size = bytes_read;
-      return true;
-    }
-    ESP_LOGE(TAG, "Failed to read file %s: %s", path, strerror(errno));
-    return false;
-  }
-
-  return true;
-}
-
-// Nouvelle méthode pour lire un fichier par morceaux avec un callback
-bool SdMmc::read_file_chunked(const char *path, 
-                             std::function<bool(const uint8_t*, size_t)> data_callback,
-                             size_t chunk_size, 
-                             size_t offset) {
-  std::string full_path = build_path(path);
-  FILE *f = fopen(full_path.c_str(), "rb");
-  if (f == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file %s for reading: %s", path, strerror(errno));
-    return false;
-  }
-
-  // Obtenir la taille du fichier
-  fseek(f, 0, SEEK_END);
-  size_t file_size = ftell(f);
-  
-  // Se positionner au bon offset
-  fseek(f, offset, SEEK_SET);
-  
-  // Allouer un buffer pour la lecture par chunks
-  uint8_t *buffer = (uint8_t*)malloc(chunk_size);
-  if (buffer == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate read buffer");
-    fclose(f);
-    return false;
-  }
-  
-  size_t bytes_left = file_size - offset;
-  bool success = true;
-  
-  while (bytes_left > 0 && success) {
-    size_t to_read = (bytes_left > chunk_size) ? chunk_size : bytes_left;
-    size_t bytes_read = fread(buffer, 1, to_read, f);
-    
-    if (bytes_read > 0) {
-      // Appel du callback avec les données lues
-      success = data_callback(buffer, bytes_read);
-      bytes_left -= bytes_read;
-    }
-    
-    if (bytes_read < to_read) {
-      // Erreur de lecture ou fin de fichier prématurée
-      if (feof(f)) {
-        // Fin de fichier normale
-        break;
-      } else {
-        // Erreur de lecture
-        ESP_LOGE(TAG, "Error reading file: %s", strerror(errno));
-        success = false;
-      }
-    }
-  }
-  
-  free(buffer);
-  fclose(f);
-  return success;
-}
-
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
 
 #ifdef USE_SENSOR
@@ -341,6 +254,8 @@ void SdMmc::set_data3_pin(uint8_t pin) { this->data3_pin_ = pin; }
 void SdMmc::set_mode_1bit(bool b) { this->mode_1bit_ = b; }
 
 void SdMmc::set_high_speed_mode(bool b) { this->high_speed_mode_ = b; }
+
+bool SdMmc::get_high_speed_mode() const { return this->high_speed_mode_; }
 
 void SdMmc::set_power_ctrl_pin(GPIOPin *pin) { this->power_ctrl_pin_ = pin; }
 
