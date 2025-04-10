@@ -76,18 +76,6 @@ void SdMmc::setup() {
   if (this->power_ctrl_pin_ != nullptr) {
     this->power_ctrl_pin_->setup();
     
-    // Configure GPIO as output using direct ESP-IDF API
-    gpio_config_t gpio_cfg = {
-      .pin_bit_mask = 1ULL << power_gpio,
-      .mode = GPIO_MODE_OUTPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&gpio_cfg);
-    
-    // Set pin to LOW to enable SD card power (following Espressif convention)
-    gpio_set_level(power_gpio, 0);
   }
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
