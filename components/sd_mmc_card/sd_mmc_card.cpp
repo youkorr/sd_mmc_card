@@ -13,8 +13,7 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_types.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+
 
 // Constantes d'optimisation pour les transferts - ajustées pour stabilité
 
