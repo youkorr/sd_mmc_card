@@ -20,7 +20,12 @@ void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
   
   // Configuration du WDT avec un délai plus long pour les gros fichiers
-  esp_task_wdt_init(60);  // Timeout de 60 secondes au lieu de 30
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 60000,  // 60 secondes au lieu de 30
+    .idle_core_mask = 0,  // Pas de cores idle 
+    .trigger_panic = false // Ne pas déclencher de panique
+  };
+  esp_task_wdt_init(&wdt_config);
   
   // Obtention du handle de la tâche courante
   TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
@@ -104,9 +109,11 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char buffer[DOWNLOAD_BUFFER_SIZE];  // Buffer plus grand pour améliorer les performances
   int bytes_received;
   size_t total_transferred = 0;
+  const char *ext = nullptr;
 
   if (!connect_to_ftp()) {
-    goto error;
+    ESP_LOGE(TAG, "Échec de connexion au serveur FTP");
+    goto cleanup;
   }
 
   // Configuration des timeouts pour les sockets
@@ -118,13 +125,15 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   send(sock_, "PASV\r\n", 6, 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
-    goto error;
+    ESP_LOGE(TAG, "Échec de passage en mode passif");
+    goto cleanup;
   }
   esp_task_wdt_reset();
 
   pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
-    goto error;
+    ESP_LOGE(TAG, "Format de réponse PASV invalide");
+    goto cleanup;
   }
 
   sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
@@ -132,7 +141,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (data_sock < 0) {
-    goto error;
+    ESP_LOGE(TAG, "Échec de création du socket de données");
+    goto cleanup;
   }
 
   // Configuration du timeout pour le socket de données
@@ -145,11 +155,12 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   data_addr.sin_addr.s_addr = htonl((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]);
 
   if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
-    goto error;
+    ESP_LOGE(TAG, "Échec de connexion au port de données");
+    goto cleanup;
   }
 
   // Définir l'en-tête Content-Type pour MP3 ou autres fichiers si nécessaire
-  const char *ext = strrchr(remote_path.c_str(), '.');
+  ext = strrchr(remote_path.c_str(), '.');
   if (ext) {
     if (strcmp(ext, ".mp3") == 0) {
       httpd_resp_set_type(req, "audio/mpeg");
@@ -168,7 +179,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
-    goto error;
+    ESP_LOGE(TAG, "Échec de la commande RETR");
+    goto cleanup;
   }
   
   ESP_LOGI(TAG, "Début du téléchargement de %s", remote_path.c_str());
@@ -204,23 +216,23 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     ESP_LOGI(TAG, "Téléchargement terminé avec succès");
   }
 
-  ::close(data_sock);
-  send(sock_, "QUIT\r\n", 6, 0);
-  ::close(sock_);
-  sock_ = -1;
-
   httpd_resp_send_chunk(req, NULL, 0);
-  return success;
 
-error:
-  ESP_LOGE(TAG, "Erreur lors du téléchargement");
-  if (data_sock != -1) ::close(data_sock);
+cleanup:
+  if (!success) {
+    ESP_LOGE(TAG, "Erreur lors du téléchargement");
+  }
+  
+  if (data_sock != -1) 
+    ::close(data_sock);
+  
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
     ::close(sock_);
     sock_ = -1;
   }
-  return false;
+  
+  return success;
 }
 
 esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
@@ -278,5 +290,6 @@ void FTPHTTPProxy::setup_http_server() {
 
 }  // namespace ftp_http_proxy
 }  // namespace esphome
+
 
 
