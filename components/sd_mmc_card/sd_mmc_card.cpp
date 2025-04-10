@@ -91,8 +91,6 @@ void SdMmc::setup() {
     ESP_LOGI(TAG, "Setting up power control pin");
     this->power_ctrl_pin_->setup();
     // Assurez-vous que la carte est alimentée
-    this->power_ctrl_pin_->digital_write(true);
-    // Utiliser delay standard au lieu de vTaskDelay
   }
 
   ESP_LOGI(TAG, "Configuring mount settings");
