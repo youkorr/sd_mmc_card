@@ -22,7 +22,6 @@
 #define SD_FREQ_DEFAULT SDMMC_FREQ_DEFAULT // 20MHz pour SDSC
 #define SD_FILE_BUFFER_SIZE 16384 // 16KB
 #define SD_DEFAULT_MAX_FILES 5 // Retour à 5 fichiers comme dans la version originale
-#define SD_POWER_STABILIZATION_DELAY 250 // 250ms pour stabilisation de l'alimentation
 
 int constexpr SD_OCR_SDHC_CAP = (1 << 30);  // value defined in esp-idf/components/sdmmc/include/sd_protocol_defs.h
 #endif
@@ -94,11 +93,6 @@ void SdMmc::setup() {
     ESP_LOGI(TAG, "Setting up power control pin as fixed output");
     this->power_ctrl_pin_->setup();
     this->power_ctrl_pin_->digital_write(true);  // Activer l'alimentation avec une sortie fixe
-    
-    // Attendre que l'alimentation se stabilise
-    ESP_LOGI(TAG, "Waiting for power stabilization (%dms)...", SD_POWER_STABILIZATION_DELAY);
-    esphome::delay(SD_POWER_STABILIZATION_DELAY);
-    ESP_LOGI(TAG, "Power stabilization complete");
   }
 
   ESP_LOGI(TAG, "Configuring mount settings");
@@ -181,7 +175,6 @@ void SdMmc::setup() {
     esp_err_t ret = sdmmc_host_set_card_clk(host.slot, 25000);
     if (ret == ESP_OK) {
       ESP_LOGI(TAG, "Successfully set to 25MHz, waiting for stabilization");
-      esphome::delay(50);  // Attendre la stabilisation
       
       // Deuxième étape à vitesse maximale
       ESP_LOGI(TAG, "Stepping up to high speed mode (40MHz)...");
