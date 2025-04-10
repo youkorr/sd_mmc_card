@@ -6,7 +6,6 @@
 
 #include "math.h"
 #include "esphome/core/log.h"
-#include "esphome/core/hal.h" // Include this for delay function
 
 #ifdef USE_ESP_IDF
 #include "esp_vfs.h"
@@ -14,22 +13,41 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_types.h"
-
-
-// Constantes d'optimisation pour les transferts - ajustées pour stabilité
-
-#define SD_FREQ_HIGH_SPEED SDMMC_FREQ_HIGHSPEED // 40MHz pour SDHC/SDXC
-#define SD_FREQ_DEFAULT SDMMC_FREQ_DEFAULT // 20MHz pour SDSC
-#define SD_FILE_BUFFER_SIZE 16384 // 16KB
-#define SD_DEFAULT_MAX_FILES 5 // Retour à 5 fichiers comme dans la version originale
+#include "esp_periph_handle.h"
+#include "periph_sdcard.h"
 
 int constexpr SD_OCR_SDHC_CAP = (1 << 30);  // value defined in esp-idf/components/sdmmc/include/sd_protocol_defs.h
 #endif
+
+/**
+ * @brief SDCARD Function Definition
+ */
+#define FUNC_SDCARD_EN              (1)
+#define SDCARD_OPEN_FILE_NUM_MAX    (5)
+#define SDCARD_INTR_GPIO            (-1)
+#define SDCARD_PWR_CTRL             GPIO_NUM_43
+#define ESP_SD_PIN_CLK              GPIO_NUM_11
+#define ESP_SD_PIN_CMD              GPIO_NUM_14
+#define ESP_SD_PIN_D0               GPIO_NUM_9
+#define ESP_SD_PIN_D1               GPIO_NUM_13
+#define ESP_SD_PIN_D2               GPIO_NUM_42
+#define ESP_SD_PIN_D3               GPIO_NUM_12
+#define ESP_SD_PIN_D4               (-1)
+#define ESP_SD_PIN_D5               (-1)
+#define ESP_SD_PIN_D6               (-1)
+#define ESP_SD_PIN_D7               (-1)
+#define ESP_SD_PIN_CD               (-1)
+#define ESP_SD_PIN_WP               (-1)
 
 namespace esphome {
 namespace sd_mmc_card {
 
 static const char *TAG = "sd_mmc_card";
+
+// SD card configuration helper functions
+int8_t get_sdcard_intr_gpio(void) { return SDCARD_INTR_GPIO; }
+int8_t get_sdcard_open_file_num_max(void) { return SDCARD_OPEN_FILE_NUM_MAX; }
+int8_t get_sdcard_power_ctrl_gpio(void) { return SDCARD_PWR_CTRL; }
 
 #ifdef USE_ESP_IDF
 static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
@@ -42,9 +60,7 @@ std::string build_path(const char *path) { return MOUNT_POINT + path; }
 FileSizeSensor::FileSizeSensor(sensor::Sensor *sensor, std::string const &path) : sensor(sensor), path(path) {}
 #endif
 
-void SdMmc::loop() {
-  // Rien à faire dans la boucle principale pour l'instant
-}
+void SdMmc::loop() {}
 
 void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "SD MMC Component");
@@ -57,9 +73,6 @@ void SdMmc::dump_config() {
     ESP_LOGCONFIG(TAG, "  DATA2 Pin: %d", this->data2_pin_);
     ESP_LOGCONFIG(TAG, "  DATA3 Pin: %d", this->data3_pin_);
   }
-  
-  ESP_LOGCONFIG(TAG, "  High Speed Mode: %s", this->high_speed_mode_ ? "Enabled" : "Disabled");
-  ESP_LOGCONFIG(TAG, "  Frequency: %d MHz", this->high_speed_mode_ ? 40 : 20);
 
   if (this->power_ctrl_pin_ != nullptr) {
     LOG_PIN("  Power Ctrl Pin: ", this->power_ctrl_pin_);
@@ -85,126 +98,99 @@ void SdMmc::dump_config() {
 }
 
 #ifdef USE_ESP_IDF
-void SdMmc::setup() {
-  ESP_LOGI(TAG, "Setting up SD MMC component");
-  
-  // Configuration correcte du pin de contrôle d'alimentation
-  if (this->power_ctrl_pin_ != nullptr) {
-    ESP_LOGI(TAG, "Setting up power control pin as fixed output");
-    this->power_ctrl_pin_->setup();
-    this->power_ctrl_pin_->digital_write(true);  // Activer l'alimentation avec une sortie fixe
+esp_err_t SdMmc::initialize_sdcard() {
+  // Enable SDCard power
+  if (get_sdcard_power_ctrl_gpio() >= 0) {
+    gpio_config_t gpio_cfg = {.mode = GPIO_MODE_OUTPUT, .pin_bit_mask = 1ULL << get_sdcard_power_ctrl_gpio()};
+    gpio_config(&gpio_cfg);
+    gpio_set_level(get_sdcard_power_ctrl_gpio(), 0);
   }
+  
+  periph_sdcard_cfg_t sdcard_cfg = {
+    .root = MOUNT_POINT.c_str(),
+    .card_detect_pin = get_sdcard_intr_gpio(),
+    .max_open_files = get_sdcard_open_file_num_max(),
+  };
+  
+  esp_periph_handle_t sdcard_handle = periph_sdcard_init(&sdcard_cfg);
+  esp_periph_set_handle_t set = esp_periph_set_get_default();
+  esp_err_t ret = esp_periph_start(set, sdcard_handle);
+  
+  int retry_time = 5;
+  bool mount_flag = false;
+  while (retry_time--) {
+    if (periph_sdcard_is_mounted(sdcard_handle)) {
+      mount_flag = true;
+      break;
+    } else {
+      vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
+  }
+  
+  if (mount_flag == false) {
+    ESP_LOGE(TAG, "Sdcard mount failed");
+    return ESP_FAIL;
+  }
+  
+  return ret;
+}
 
-  ESP_LOGI(TAG, "Configuring mount settings");
+void SdMmc::setup() {
+  if (this->power_ctrl_pin_ != nullptr)
+    this->power_ctrl_pin_->setup();
+
+  // Try the new initialization method first
+  if (initialize_sdcard() == ESP_OK) {
+    #ifdef USE_TEXT_SENSOR
+    if (this->sd_card_type_text_sensor_ != nullptr)
+      this->sd_card_type_text_sensor_->publish_state(sd_card_type());
+    #endif
+    
+    update_sensors();
+    return;
+  }
+  
+  // Fall back to the original method if the new one fails
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false, 
-      .max_files = SD_DEFAULT_MAX_FILES, 
-      .allocation_unit_size = 16 * 1024};  // 16KB par bloc pour de meilleures performances
+      .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 16 * 1024};
 
-  ESP_LOGI(TAG, "Configuring host");
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-  
-  // Réduire la fréquence initiale pour améliorer la stabilité de l'initialisation
-  host.max_freq_khz = SDMMC_FREQ_DEFAULT;
-  
-  ESP_LOGI(TAG, "Configuring slot");
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
   if (this->mode_1bit_) {
-    ESP_LOGI(TAG, "Setting 1-bit mode");
     slot_config.width = 1;
-    host.flags &= ~SDMMC_HOST_FLAG_4BIT;
   } else {
-    ESP_LOGI(TAG, "Setting 4-bit mode");
     slot_config.width = 4;
-    host.flags |= SDMMC_HOST_FLAG_4BIT;  // Force le mode 4-bit
   }
 
 #ifdef SOC_SDMMC_USE_GPIO_MATRIX
-  ESP_LOGI(TAG, "Setting GPIO pins: CLK=%d, CMD=%d, D0=%d", 
-           this->clk_pin_, this->cmd_pin_, this->data0_pin_);
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
   slot_config.d0 = static_cast<gpio_num_t>(this->data0_pin_);
 
   if (!this->mode_1bit_) {
-    ESP_LOGI(TAG, "Setting additional data pins: D1=%d, D2=%d, D3=%d", 
-             this->data1_pin_, this->data2_pin_, this->data3_pin_);
     slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
     slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
     slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
   }
 #endif
 
-  // Activer les pullups internes sur les broches de données uniquement, pas sur le contrôle d'alimentation
-  if (!this->mode_1bit_) {
-    // En mode 4-bit, activez les pullups pour la stabilité des données
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    ESP_LOGI(TAG, "Internal pullups enabled for data lines");
-  } else {
-    // En mode 1-bit, on peut aussi utiliser les pullups pour stabiliser DATA0
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    ESP_LOGI(TAG, "Internal pullups enabled for data line");
-  }
+  // Enable internal pullups on enabled pins. The internal pullups
+  // are insufficient however, please make sure 10k external pullups are
+  // connected on the bus. This is for debug / example purpose only.
+  slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
-  ESP_LOGI(TAG, "Mounting SD card...");
   auto ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
 
   if (ret != ESP_OK) {
     if (ret == ESP_FAIL) {
       this->init_error_ = ErrorCode::ERR_MOUNT;
-      ESP_LOGE(TAG, "Failed to mount filesystem on SD card (%s)", esp_err_to_name(ret));
     } else {
       this->init_error_ = ErrorCode::ERR_NO_CARD;
-      ESP_LOGE(TAG, "Failed to initialize the card (%s)", esp_err_to_name(ret));
     }
     mark_failed();
     return;
   }
-
-  ESP_LOGI(TAG, "SD card mounted successfully");
-  
-  // Augmentation progressive de la vitesse pour les cartes en mode 4-bit
-  bool is_high_cap = (this->card_->ocr & SD_OCR_SDHC_CAP) ? true : false;
-  
-  if (!this->mode_1bit_ && is_high_cap && this->high_speed_mode_) {
-    ESP_LOGI(TAG, "Card initialized in 4-bit mode, gradually increasing speed...");
-    
-    // Première étape à 25 MHz
-    ESP_LOGI(TAG, "Stepping up to 25MHz...");
-    esp_err_t ret = sdmmc_host_set_card_clk(host.slot, 25000);
-    if (ret == ESP_OK) {
-      ESP_LOGI(TAG, "Successfully set to 25MHz, waiting for stabilization");
-      
-      // Deuxième étape à vitesse maximale
-      ESP_LOGI(TAG, "Stepping up to high speed mode (40MHz)...");
-      ret = sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
-      if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Successfully set high speed mode (40MHz)");
-      } else {
-        ESP_LOGW(TAG, "Failed to set 40MHz, staying at 25MHz: %s", esp_err_to_name(ret));
-      }
-    } else {
-      ESP_LOGW(TAG, "Failed to set 25MHz, staying at default speed: %s", esp_err_to_name(ret));
-    }
-  } else if (is_high_cap && this->high_speed_mode_) {
-    // Mode 1-bit avec carte haute capacité
-    ESP_LOGI(TAG, "Setting high speed mode for SDHC/SDXC card (1-bit mode)");
-    sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
-  }
-
-  // Afficher des informations détaillées sur la carte et la configuration
-  ESP_LOGI(TAG, "SD Card Info:");
-  ESP_LOGI(TAG, "  Name: %s", this->card_->cid.name);
-  ESP_LOGI(TAG, "  Type: %s", this->sd_card_type().c_str());
-  ESP_LOGI(TAG, "  Bus Width: %d-bit", this->mode_1bit_ ? 1 : 4);
-  ESP_LOGI(TAG, "  Clock Frequency: %d kHz", this->card_->host.max_freq_khz);
-  ESP_LOGI(TAG, "  Size: %lluMB", this->card_->csd.capacity / (1024));
-  ESP_LOGI(TAG, "  CSD: ver=%d, sector_size=%d, capacity=%lld, read_bl_len=%d",
-           this->card_->csd.csd_ver,
-           this->card_->csd.sector_size,
-           this->card_->csd.capacity,
-           this->card_->csd.read_block_len);
 
 #ifdef USE_TEXT_SENSOR
   if (this->sd_card_type_text_sensor_ != nullptr)
@@ -218,6 +204,7 @@ void SdMmc::setup() {
 size_t SdMmc::file_size(const char *path) {
   std::string absolut_path = build_path(path);
   struct stat info;
+  size_t file_size = 0;
   if (stat(absolut_path.c_str(), &info) < 0) {
     ESP_LOGE(TAG, "Failed to stat file: %s", strerror(errno));
     return -1;
@@ -268,97 +255,6 @@ void SdMmc::update_sensors() {
 #endif
 }
 
-// Implementation of read_file
-bool SdMmc::read_file(const char *path, uint8_t *buffer, size_t &size, size_t offset) {
-  std::string full_path = build_path(path);
-  FILE *f = fopen(full_path.c_str(), "rb");
-  if (f == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file %s for reading: %s", path, strerror(errno));
-    return false;
-  }
-
-  // Positionnement au point de départ demandé
-  if (fseek(f, offset, SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek in file %s: %s", path, strerror(errno));
-    fclose(f);
-    return false;
-  }
-
-  // Lecture optimisée
-  size_t bytes_read = fread(buffer, 1, size, f);
-  fclose(f);
-
-  if (bytes_read != size) {
-    // C'est normal si on atteint la fin du fichier
-    if (feof(f)) {
-      size = bytes_read;
-      return true;
-    }
-    ESP_LOGE(TAG, "Failed to read file %s: %s", path, strerror(errno));
-    return false;
-  }
-
-  return true;
-}
-
-// Implementation of read_file_chunked
-bool SdMmc::read_file_chunked(const char *path, 
-                             std::function<bool(const uint8_t*, size_t)> data_callback,
-                             size_t chunk_size, 
-                             size_t offset) {
-  std::string full_path = build_path(path);
-  FILE *f = fopen(full_path.c_str(), "rb");
-  if (f == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file %s for reading: %s", path, strerror(errno));
-    return false;
-  }
-
-  // Obtenir la taille du fichier
-  fseek(f, 0, SEEK_END);
-  size_t file_size = ftell(f);
-  
-  // Se positionner au bon offset
-  fseek(f, offset, SEEK_SET);
-  
-  // Allouer un buffer pour la lecture par chunks
-  uint8_t* buffer = (uint8_t*)malloc(chunk_size);
-  if (buffer == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate read buffer");
-    fclose(f);
-    return false;
-  }
-  
-  size_t bytes_left = file_size - offset;
-  bool success = true;
-  
-  while (bytes_left > 0 && success) {
-    size_t to_read = (bytes_left > chunk_size) ? chunk_size : bytes_left;
-    size_t bytes_read = fread(buffer, 1, to_read, f);
-    
-    if (bytes_read > 0) {
-      // Appel du callback avec les données lues
-      success = data_callback(buffer, bytes_read);
-      bytes_left -= bytes_read;
-    }
-    
-    if (bytes_read < to_read) {
-      // Erreur de lecture ou fin de fichier prématurée
-      if (feof(f)) {
-        // Fin de fichier normale
-        break;
-      } else {
-        // Erreur de lecture
-        ESP_LOGE(TAG, "Error reading file: %s", strerror(errno));
-        success = false;
-      }
-    }
-  }
-  
-  free(buffer);
-  fclose(f);
-  return success;
-}
-
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
 
 #ifdef USE_SENSOR
@@ -380,10 +276,6 @@ void SdMmc::set_data2_pin(uint8_t pin) { this->data2_pin_ = pin; }
 void SdMmc::set_data3_pin(uint8_t pin) { this->data3_pin_ = pin; }
 
 void SdMmc::set_mode_1bit(bool b) { this->mode_1bit_ = b; }
-
-void SdMmc::set_high_speed_mode(bool b) { this->high_speed_mode_ = b; }
-
-bool SdMmc::get_high_speed_mode() const { return this->high_speed_mode_; }
 
 void SdMmc::set_power_ctrl_pin(GPIOPin *pin) { this->power_ctrl_pin_ = pin; }
 
