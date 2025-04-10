@@ -159,7 +159,7 @@ void SdMmc::setup() {
   bool is_high_cap = (this->card_->ocr & SD_OCR_SDHC_CAP) ? true : false;
   
   // Ne pas forcer le mode haute vitesse si l'utilisateur ne l'a pas activé
-  if (is_high_cap && this->high_speed_mode_ && SD_DMA_MODE) {
+  if (is_high_cap && this->high_speed_mode_) {
     ESP_LOGI(TAG, "Setting high speed mode for SDHC/SDXC card");
     sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
   }
