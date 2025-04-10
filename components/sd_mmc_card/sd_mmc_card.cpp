@@ -72,11 +72,29 @@ void SdMmc::dump_config() {
 
 #ifdef USE_ESP_IDF
 void SdMmc::setup() {
-  if (this->power_ctrl_pin_ != nullptr)
-    this->power_ctrl_pin_->setup();
+  // Enable SDCard power if power control pin is configured
+  if (this->power_ctrl_pin_ != nullptr) {
+    gpio_num_t power_gpio = static_cast<gpio_num_t>(this->power_ctrl_pin_->get_pin());
+    
+    // Configure GPIO as output using direct ESP-IDF API
+    gpio_config_t gpio_cfg = {
+      .pin_bit_mask = 1ULL << power_gpio,
+      .mode = GPIO_MODE_OUTPUT,
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&gpio_cfg);
+    
+    // Set pin to LOW to enable SD card power (following Espressif convention)
+    gpio_set_level(power_gpio, 0);
+  }
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 16 * 1024};
+      .format_if_mount_failed = false, 
+      .max_files = 5, 
+      .allocation_unit_size = 16 * 1024
+  };
 
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -99,18 +117,37 @@ void SdMmc::setup() {
   }
 #endif
 
-  // Enable internal pullups on enabled pins. The internal pullups
-  // are insufficient however, please make sure 10k external pullups are
-  // connected on the bus. This is for debug / example purpose only.
+  // Enable internal pullups on enabled pins
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
-  auto ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
+  // Try to mount the SD card
+  esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
+  
+  // Implementation like Espressif's periph_sdcard_init
+  int retry_time = 5;
+  bool mount_flag = false;
+  
+  // First attempt already done above, now we'll retry if needed
+  if (ret == ESP_OK) {
+    mount_flag = true;
+  } else {
+    // Retry logic without using delays
+    while (--retry_time > 0) {
+      ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
+      if (ret == ESP_OK) {
+        mount_flag = true;
+        break;
+      }
+    }
+  }
 
-  if (ret != ESP_OK) {
+  if (!mount_flag) {
     if (ret == ESP_FAIL) {
       this->init_error_ = ErrorCode::ERR_MOUNT;
+      ESP_LOGE(TAG, "Failed to mount filesystem on SD card");
     } else {
       this->init_error_ = ErrorCode::ERR_NO_CARD;
+      ESP_LOGE(TAG, "No SD card detected");
     }
     mark_failed();
     return;
