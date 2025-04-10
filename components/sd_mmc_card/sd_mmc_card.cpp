@@ -21,6 +21,7 @@
 #define SD_FREQ_DEFAULT SDMMC_FREQ_DEFAULT // 20MHz pour SDSC
 #define SD_FILE_BUFFER_SIZE 16384 // 16KB
 #define SD_DEFAULT_MAX_FILES 5 // Retour à 5 fichiers comme dans la version originale
+#define SD_POWER_STABILIZATION_DELAY 250 // 250ms pour stabilisation de l'alimentation
 
 int constexpr SD_OCR_SDHC_CAP = (1 << 30);  // value defined in esp-idf/components/sdmmc/include/sd_protocol_defs.h
 #endif
@@ -87,10 +88,16 @@ void SdMmc::dump_config() {
 void SdMmc::setup() {
   ESP_LOGI(TAG, "Setting up SD MMC component");
   
+  // Configuration correcte du pin de contrôle d'alimentation
   if (this->power_ctrl_pin_ != nullptr) {
-    ESP_LOGI(TAG, "Setting up power control pin");
+    ESP_LOGI(TAG, "Setting up power control pin as fixed output");
     this->power_ctrl_pin_->setup();
-    // Assurez-vous que la carte est alimentée
+    this->power_ctrl_pin_->digital_write(true);  // Activer l'alimentation avec une sortie fixe
+    
+    // Attendre que l'alimentation se stabilise
+    ESP_LOGI(TAG, "Waiting for power stabilization (%dms)...", SD_POWER_STABILIZATION_DELAY);
+    delay(SD_POWER_STABILIZATION_DELAY);
+    ESP_LOGI(TAG, "Power stabilization complete");
   }
 
   ESP_LOGI(TAG, "Configuring mount settings");
@@ -102,8 +109,8 @@ void SdMmc::setup() {
   ESP_LOGI(TAG, "Configuring host");
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   
-  // Configuration du mode 4-bit par défaut (sera ajusté si nécessaire)
-  // Ne pas modifier host.max_freq_khz ici - nous le ferons après l'initialisation
+  // Réduire la fréquence initiale pour améliorer la stabilité de l'initialisation
+  host.max_freq_khz = SDMMC_FREQ_DEFAULT;
   
   ESP_LOGI(TAG, "Configuring slot");
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -115,6 +122,7 @@ void SdMmc::setup() {
   } else {
     ESP_LOGI(TAG, "Setting 4-bit mode");
     slot_config.width = 4;
+    host.flags |= SDMMC_HOST_FLAG_4BIT;  // Force le mode 4-bit
   }
 
 #ifdef SOC_SDMMC_USE_GPIO_MATRIX
@@ -133,9 +141,16 @@ void SdMmc::setup() {
   }
 #endif
 
-  // Activer les pullups internes sur les broches
-  slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-  ESP_LOGI(TAG, "Internal pullups enabled");
+  // Activer les pullups internes sur les broches de données uniquement, pas sur le contrôle d'alimentation
+  if (!this->mode_1bit_) {
+    // En mode 4-bit, activez les pullups pour la stabilité des données
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    ESP_LOGI(TAG, "Internal pullups enabled for data lines");
+  } else {
+    // En mode 1-bit, on peut aussi utiliser les pullups pour stabiliser DATA0
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    ESP_LOGI(TAG, "Internal pullups enabled for data line");
+  }
 
   ESP_LOGI(TAG, "Mounting SD card...");
   auto ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
@@ -152,20 +167,44 @@ void SdMmc::setup() {
     return;
   }
 
-  // Déterminer si la carte est SDHC/SDXC et si elle peut fonctionner en mode haute vitesse
+  ESP_LOGI(TAG, "SD card mounted successfully");
+  
+  // Augmentation progressive de la vitesse pour les cartes en mode 4-bit
   bool is_high_cap = (this->card_->ocr & SD_OCR_SDHC_CAP) ? true : false;
   
-  // Ne pas forcer le mode haute vitesse si l'utilisateur ne l'a pas activé
-  if (is_high_cap && this->high_speed_mode_) {
-    ESP_LOGI(TAG, "Setting high speed mode for SDHC/SDXC card");
+  if (!this->mode_1bit_ && is_high_cap && this->high_speed_mode_) {
+    ESP_LOGI(TAG, "Card initialized in 4-bit mode, gradually increasing speed...");
+    
+    // Première étape à 25 MHz
+    ESP_LOGI(TAG, "Stepping up to 25MHz...");
+    esp_err_t ret = sdmmc_host_set_card_clk(host.slot, 25000);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG, "Successfully set to 25MHz, waiting for stabilization");
+      delay(50);  // Attendre la stabilisation
+      
+      // Deuxième étape à vitesse maximale
+      ESP_LOGI(TAG, "Stepping up to high speed mode (40MHz)...");
+      ret = sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
+      if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Successfully set high speed mode (40MHz)");
+      } else {
+        ESP_LOGW(TAG, "Failed to set 40MHz, staying at 25MHz: %s", esp_err_to_name(ret));
+      }
+    } else {
+      ESP_LOGW(TAG, "Failed to set 25MHz, staying at default speed: %s", esp_err_to_name(ret));
+    }
+  } else if (is_high_cap && this->high_speed_mode_) {
+    // Mode 1-bit avec carte haute capacité
+    ESP_LOGI(TAG, "Setting high speed mode for SDHC/SDXC card (1-bit mode)");
     sdmmc_host_set_card_clk(host.slot, SD_FREQ_HIGH_SPEED);
   }
 
-  ESP_LOGI(TAG, "SD card mounted successfully");
-  ESP_LOGI(TAG, "Card info:");
+  // Afficher des informations détaillées sur la carte et la configuration
+  ESP_LOGI(TAG, "SD Card Info:");
   ESP_LOGI(TAG, "  Name: %s", this->card_->cid.name);
   ESP_LOGI(TAG, "  Type: %s", this->sd_card_type().c_str());
-  ESP_LOGI(TAG, "  Speed: %s", this->high_speed_mode_ ? "High Speed" : "Normal Speed");
+  ESP_LOGI(TAG, "  Bus Width: %d-bit", this->mode_1bit_ ? 1 : 4);
+  ESP_LOGI(TAG, "  Clock Frequency: %d kHz", this->card_->host.max_freq_khz);
   ESP_LOGI(TAG, "  Size: %lluMB", this->card_->csd.capacity / (1024));
   ESP_LOGI(TAG, "  CSD: ver=%d, sector_size=%d, capacity=%lld, read_bl_len=%d",
            this->card_->csd.csd_ver,
@@ -288,7 +327,7 @@ bool SdMmc::read_file_chunked(const char *path,
   fseek(f, offset, SEEK_SET);
   
   // Allouer un buffer pour la lecture par chunks
-  uint8_t *buffer = (uint8_t*)malloc(chunk_size);
+  uint8_t buffer = (uint8_t)malloc(chunk_size);
   if (buffer == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate read buffer");
     fclose(f);
