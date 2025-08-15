@@ -1,4 +1,5 @@
 #include "sd_mmc_card.h"
+#include "esp_task_wdt.h"
 
 #include <algorithm>
 #include <vector>
@@ -38,6 +39,7 @@ void SdMmc::loop() {}
 void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "SD MMC Component");
   ESP_LOGCONFIG(TAG, "  Mode 1 bit: %s", TRUEFALSE(this->mode_1bit_));
+  ESP_LOGCONFIG(TAG, "  Slot: %d", this->slot_); 
   ESP_LOGCONFIG(TAG, "  CLK Pin: %d", this->clk_pin_);
   ESP_LOGCONFIG(TAG, "  CMD Pin: %d", this->cmd_pin_);
   ESP_LOGCONFIG(TAG, "  DATA0 Pin: %d", this->data0_pin_);
@@ -46,9 +48,16 @@ void SdMmc::dump_config() {
     ESP_LOGCONFIG(TAG, "  DATA2 Pin: %d", this->data2_pin_);
     ESP_LOGCONFIG(TAG, "  DATA3 Pin: %d", this->data3_pin_);
   }
-
   if (this->power_ctrl_pin_ != nullptr) {
     LOG_PIN("  Power Ctrl Pin: ", this->power_ctrl_pin_);
+  }
+
+  if (!this->is_failed()) {
+    const char *freq_unit = card_->real_freq_khz < 1000 ? "kHz" : "MHz";
+    const float freq = card_->real_freq_khz < 1000 ? card_->real_freq_khz : card_->real_freq_khz / 1000.0;
+    const char *max_freq_unit = card_->max_freq_khz < 1000 ? "kHz" : "MHz";
+    const float max_freq = card_->max_freq_khz < 1000 ? card_->max_freq_khz : card_->max_freq_khz / 1000.0;
+    ESP_LOGCONFIG(TAG, "  Card Speed:  %.2f %s (limit: %.2f %s)%s", freq, freq_unit, max_freq, max_freq_unit, card_->is_ddr ? ", DDR" : "");
   }
 
 #ifdef USE_SENSOR
@@ -63,123 +72,107 @@ void SdMmc::dump_config() {
 #ifdef USE_TEXT_SENSOR
   LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
 #endif
-
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Setup failed : %s", SdMmc::error_code_to_string(this->init_error_).c_str());
     return;
   }
 }
-
 #ifdef USE_ESP_IDF
+
 void SdMmc::setup() {
-  // Enable SDCard power if power control pin is configured
+  // Power control
   if (this->power_ctrl_pin_ != nullptr) {
     this->power_ctrl_pin_->setup();
-    
   }
-    // Declare max_files here with a default value
-  size_t max_files = 16; // or any other appropriate value
   
+  // Configuration optimale
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false, 
-      .max_files = max_files, 
-      .allocation_unit_size = 16 * 1024
+    .format_if_mount_failed = false,
+    .max_files = 16,
+    .allocation_unit_size = 256 * 1024  // 256KB optimise l'écriture des fichiers
   };
-
+  
+  // Configuration du host avec le slot spécifié
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-  host.max_freq_khz = 40000;  // Limite la fréquence à 40 MHz
-  //host.flags &= ~SDMMC_HOST_FLAG_DDR;  // ⛔ Désactiver DDR (par défaut il peut être actif si le matériel le permet)
-  host.flags |= SDMMC_HOST_FLAG_DDR;  // ✅ Activer DDR si tu veux tester la vitesse maximale (avec bus_width = 4)
-  sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-
-  if (this->mode_1bit_) {
-    slot_config.width = 1;
+  host.slot = SDMMC_HOST_SLOT_0 + this->slot_;  // Utilise le slot configuré
+  host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 50MHz
+  
+  // Dans les versions récentes d'ESP-IDF, DMA est généralement activé par défaut
+  // ou configuré différemment, donc on n'ajoute pas SDMMC_HOST_FLAG_DMA
+  
+  // Activer DDR seulement en mode 4 bits
+  if (!this->mode_1bit_) {
+    host.flags |= SDMMC_HOST_FLAG_DDR;
   } else {
-    slot_config.width = 4;
+    host.flags &= ~SDMMC_HOST_FLAG_DDR;
   }
-
-#ifdef SOC_SDMMC_USE_GPIO_MATRIX
+  
+  sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+  slot_config.width = this->mode_1bit_ ? 1 : 4;
+  
+  // Configuration des pins seulement si on utilise GPIO matrix
+  #ifdef SOC_SDMMC_USE_GPIO_MATRIX
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
   slot_config.d0 = static_cast<gpio_num_t>(this->data0_pin_);
-
   if (!this->mode_1bit_) {
     slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
     slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
     slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
   }
-#endif
-
-  // Enable internal pullups on enabled pins
+  #endif
+  
+  // Enable internal pullups
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-
-  // Try to mount the SD card
-  esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
   
-  // Implementation like Espressif's periph_sdcard_init
-  int retry_time = 5;
-  bool mount_flag = false;
-  
-  // First attempt already done above, now we'll retry if needed
-  if (ret == ESP_OK) {
-    mount_flag = true;
-  } else {
-    // Retry logic without using delays
-    while (--retry_time > 0) {
-      ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
-      if (ret == ESP_OK) {
-        mount_flag = true;
-        break;
-      }
-    }
+  // Initialiser le slot spécifique avant le montage
+  ESP_LOGI(TAG, "Initializing SDMMC slot %d", this->slot_);
+  esp_err_t slot_init = sdmmc_host_init_slot(host.slot, &slot_config);
+  if (slot_init != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize slot %d: %s", this->slot_, esp_err_to_name(slot_init));
+    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
+    mark_failed();
+    return;
   }
-
-  if (!mount_flag) {
+  
+  // Try to mount with optimized retry logic
+  esp_err_t ret = ESP_FAIL;
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    ESP_LOGI(TAG, "Mounting SD Card on slot %d (attempt %d/3)...", this->slot_, attempt);
+    ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG, "SD Card mounted successfully on slot %d!", this->slot_);
+      break;
+    }
+    ESP_LOGW(TAG, "Mount attempt %d failed: %s", attempt, esp_err_to_name(ret));
+    vTaskDelay(pdMS_TO_TICKS(100));  // Pause entre tentatives
+  }
+  
+  if (ret != ESP_OK) {
     if (ret == ESP_FAIL) {
       this->init_error_ = ErrorCode::ERR_MOUNT;
-      ESP_LOGE(TAG, "Failed to mount filesystem on SD card");
+      ESP_LOGE(TAG, "Failed to mount filesystem on SD card (slot %d)", this->slot_);
     } else {
       this->init_error_ = ErrorCode::ERR_NO_CARD;
-      ESP_LOGE(TAG, "No SD card detected");
+      ESP_LOGE(TAG, "No SD card detected on slot %d", this->slot_);
     }
     mark_failed();
     return;
   }
-
-#ifdef USE_TEXT_SENSOR
+  
+  // Diagnostic de la carte
+  ESP_LOGI(TAG, "SD Card Info (slot %d):", this->slot_);
+  ESP_LOGI(TAG, "  Name: %s", this->card_->cid.name);
+  ESP_LOGI(TAG, "  Type: %s", sd_card_type().c_str());
+  ESP_LOGI(TAG, "  Speed: %d kHz (max: %d kHz)", this->card_->max_freq_khz, SDMMC_FREQ_HIGHSPEED);
+  ESP_LOGI(TAG, "  Size: %llu MB", ((uint64_t)this->card_->csd.capacity * this->card_->csd.sector_size) / (1024 * 1024));
+  
+  #ifdef USE_TEXT_SENSOR
   if (this->sd_card_type_text_sensor_ != nullptr)
     this->sd_card_type_text_sensor_->publish_state(sd_card_type());
-#endif
-
+  #endif
+  
   update_sensors();
-}
-#endif
-
-void SdMmc::write_file(const char *path, const uint8_t *buffer, size_t len) {
-  ESP_LOGV(TAG, "Writing to file: %s", path);
-  this->write_file(path, buffer, len, "w");
-}
-
-void SdMmc::append_file(const char *path, const uint8_t *buffer, size_t len) {
-  ESP_LOGV(TAG, "Appending to file: %s", path);
-  this->write_file(path, buffer, len, "a");
-}
-
-#ifdef USE_ESP_IDF
-void SdMmc::write_file(const char *path, const uint8_t *buffer, size_t len, const char *mode) {
-  std::string absolut_path = build_path(path);
-  FILE *file = NULL;
-  file = fopen(absolut_path.c_str(), mode);
-  if (file == NULL) {
-    ESP_LOGE(TAG, "Failed to open file for writing");
-    return;
-  }
-  bool ok = fwrite(buffer, 1, len, file);
-  if (!ok) {
-    ESP_LOGE(TAG, "Failed to write to file");
-  }
-  fclose(file);
-  this->update_sensors();
 }
 
 void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t len, size_t chunk_size) {
@@ -379,81 +372,79 @@ bool SdMmc::delete_file(const char *path) {
   return true;
 }
 
-std::vector<uint8_t> SdMmc::read_file(char const *path) {
+// Lecture complète d'un fichier
+std::vector<uint8_t> SdMmc::read_file(const char *path) {
   ESP_LOGV(TAG, "Read File: %s", path);
 
-  std::string absolut_path = build_path(path);
-  FILE *file = nullptr;
-  file = fopen(absolut_path.c_str(), "rb");
-  if (file == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file for reading");
-    return std::vector<uint8_t>();
+  // Vérifier d'abord la taille du fichier
+  size_t file_size = this->file_size(path);
+  
+  // Limite de sécurité, par exemple 5MB
+  constexpr size_t MAX_SAFE_SIZE = 5 * 1024 * 1024;
+  
+  if (file_size > MAX_SAFE_SIZE) {
+    ESP_LOGE(TAG, "File too large for direct reading: %zu bytes (max: %zu). Use read_file_stream instead.", 
+             file_size, MAX_SAFE_SIZE);
+    return {};
   }
 
-  std::vector<uint8_t> res;
-  size_t fileSize = this->file_size(path);
-  res.resize(fileSize);
-  size_t len = fread(res.data(), 1, fileSize, file);
+  std::string absolut_path = build_path(path);
+  FILE *file = fopen(absolut_path.c_str(), "rb");
+  if (file == nullptr) {
+    ESP_LOGE(TAG, "Failed to open file for reading");
+    return {};
+  }
+
+  std::vector<uint8_t> res(file_size);
+  size_t read_len = fread(res.data(), 1, file_size, file);
   fclose(file);
-  if (len < 0) {
-    ESP_LOGE(TAG, "Failed to read file: %s", strerror(errno));
-    return std::vector<uint8_t>();
+
+  if (read_len != file_size) {
+    ESP_LOGE(TAG, "Read incomplete: expected %zu bytes, got %zu", file_size, read_len);
+    return {};
   }
 
   return res;
 }
 
-// Lecture d'un fichier en une seule fois (existant)
-std::vector<uint8_t> SdMmc::read_file_chunked(const char *path, size_t offset, size_t chunk_size) {
-    std::string absolut_path = build_path(path);
-    FILE *file = fopen(absolut_path.c_str(), "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open file: %s", absolut_path.c_str());
-        return {};
-    }
 
-    std::unique_ptr<FILE, decltype(&fclose)> file_guard(file, fclose);
 
-    if (fseek(file, offset, SEEK_SET) != 0) {
-        ESP_LOGE(TAG, "Failed to seek to position %zu in file: %s (errno: %d)", offset, absolut_path.c_str(), errno);
-        return {};
-    }
-
-    std::vector<uint8_t> res(chunk_size);
-    size_t read = fread(res.data(), 1, chunk_size, file);
-    res.resize(read); // Ajuste la taille
-
-    return res;
-}
-
-// Nouvelle fonction pour le streaming
-void SdMmc::read_file_stream(const char *path, size_t offset, size_t chunk_size, 
+// Lecture en streaming par chunks avec reset du WDT
+void SdMmc::read_file_stream(const char *path, size_t offset, size_t chunk_size,
                              std::function<void(const uint8_t*, size_t)> callback) {
-    std::string absolut_path = build_path(path);
-    FILE *file = fopen(absolut_path.c_str(), "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open file: %s", absolut_path.c_str());
-        return;
-    }
+  std::string absolut_path = build_path(path);
+  FILE *file = fopen(absolut_path.c_str(), "rb");
+  if (!file) {
+    ESP_LOGE(TAG, "Failed to open file: %s", absolut_path.c_str());
+    return;
+  }
 
-    std::unique_ptr<FILE, decltype(&fclose)> file_guard(file, fclose);
+  std::unique_ptr<FILE, decltype(&fclose)> file_guard(file, fclose);
 
-    if (fseek(file, offset, SEEK_SET) != 0) {
-        ESP_LOGE(TAG, "Failed to seek to position %zu in file: %s (errno: %d)", offset, absolut_path.c_str(), errno);
-        return;
-    }
+  if (fseek(file, offset, SEEK_SET) != 0) {
+    ESP_LOGE(TAG, "Failed to seek to position %zu in file: %s (errno: %d)", offset, absolut_path.c_str(), errno);
+    return;
+  }
 
-    std::vector<uint8_t> buffer(chunk_size);
-    size_t read;
-    
-    while ((read = fread(buffer.data(), 1, chunk_size, file)) > 0) {
-        callback(buffer.data(), read);  // Envoie les données par callback
-    }
+  std::vector<uint8_t> buffer(chunk_size);
+  size_t read = 0;
+  size_t bytes_since_reset = 0;
 
-    if (ferror(file)) {
-        ESP_LOGE(TAG, "Error reading file: %s", absolut_path.c_str());
+  while ((read = fread(buffer.data(), 1, chunk_size, file)) > 0) {
+    callback(buffer.data(), read);
+    bytes_since_reset += read;
+
+    if (bytes_since_reset >= 64 * 1024) {
+      esp_task_wdt_reset();
+      bytes_since_reset = 0;
     }
+  }
+
+  if (ferror(file)) {
+    ESP_LOGE(TAG, "Error reading file: %s", absolut_path.c_str());
+  }
 }
+
 
 #endif
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
@@ -512,5 +503,9 @@ FileInfo::FileInfo(std::string const &path, size_t size, bool is_directory)
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
+
+
+
 
 
