@@ -27,7 +27,20 @@ static const char *TAG = "sd_mmc_card";
 static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
 static const std::string MOUNT_POINT("/sdcard");
 
-std::string build_path(const char *path) { return MOUNT_POINT + path; }
+//std::string build_path(const char *path) { return MOUNT_POINT + path; }
+std::string build_path(const char *path_cstr) {
+  std::string p = path_cstr ? std::string(path_cstr) : std::string();
+
+  if (p.empty()) return MOUNT_POINT;                 // "/sdcard"
+
+  // Si le chemin commence déjà par le point de montage, le renvoyer tel quel
+  if (p.rfind(MOUNT_POINT, 0) == 0) return p;        // "/sdcard/..."
+
+  // S'assurer qu'il y a un slash au début
+  if (p.front() != '/') p.insert(p.begin(), '/');    // "foo" -> "/foo"
+
+  return MOUNT_POINT + p;                            // "/sdcard/foo"
+}
 #endif
 
 #ifdef USE_SENSOR
