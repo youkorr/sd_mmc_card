@@ -24,7 +24,12 @@ namespace sd_mmc_card {
 static const char *TAG = "sd_mmc_card";
 
 #ifdef USE_ESP_IDF
-static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
+// Maximum length of a FAT long file name (255 characters + null terminator).
+// Note: CONFIG_SPIFFS_OBJ_NAME_LEN was previously used here, but it is only
+// defined when the SPIFFS component is enabled in ESP-IDF. As this component
+// uses a FAT filesystem, rely on a fixed constant instead.
+static constexpr size_t MAX_FILE_NAME_LEN = 256;
+static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + MAX_FILE_NAME_LEN;
 static const std::string MOUNT_POINT("/sdcard");
 
 //std::string build_path(const char *path) { return MOUNT_POINT + path; }

@@ -12,6 +12,7 @@ from esphome.const import (
     CONF_PULLDOWN,
 )
 from esphome.core import CORE
+from esphome.components.esp32 import add_idf_sdkconfig_option
 
 CODEOWNERS = ["@youkorr"]
 
@@ -84,6 +85,15 @@ async def to_code(config):
     if (CONF_POWER_CTRL_PIN in config):
         power_ctrl = await cg.gpio_pin_expression(config[CONF_POWER_CTRL_PIN])
         cg.add(var.set_power_ctrl_pin(power_ctrl))
+
+    # This component relies on POSIX directory functions (opendir, readdir,
+    # mkdir, stat, unlink, rmdir, ...). On ESP-IDF these are only linked when
+    # the VFS is built with directory support; otherwise the linker reports
+    # e.g. "readdir is not implemented and will always fail" and the SD
+    # directory operations silently fail at runtime. Force the options on.
+    if CORE.using_esp_idf:
+        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_IO", True)
+        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
 
 
 SD_MMC_PATH_ACTION_SCHEMA = cv.Schema(

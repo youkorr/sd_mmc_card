@@ -137,21 +137,14 @@ void WebDAVBox3::setup() {
     }
     closedir(dir);
   }
-  
-  // 2. Essayer de créer un fichier test
-  std::string test_file = root_path_;
-  if (test_file.back() != '/') test_file += '/';
-  test_file += "webdav_test.txt";
-  
-  FILE *f = fopen(test_file.c_str(), "w");
-  if (f) {
-    fputs("Test WebDAV access", f);
-    fclose(f);
-    ESP_LOGI(TAG, "Fichier test créé avec succès: %s", test_file.c_str());
-  } else {
-    ESP_LOGE(TAG, "Impossible de créer un fichier test (errno: %d)", errno);
-  }
-  
+
+  // NOTE: previously this setup() wrote a "webdav_test.txt" file to the SD card
+  // on every boot. Writing to the user's card unsolicited at startup is unsafe:
+  // if the board is reset or powered off (and the card pulled) before FATFS has
+  // safely flushed, the directory/FAT can be left inconsistent and the existing
+  // contents may appear deleted on a PC. The write served no functional purpose
+  // (it only validated write access) and has been removed.
+
   // Continuer avec le reste du setup...
   this->configure_http_server();
   this->start_server();
