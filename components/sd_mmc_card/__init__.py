@@ -14,6 +14,17 @@ from esphome.const import (
 from esphome.core import CORE
 from esphome.components.esp32 import add_idf_sdkconfig_option
 
+# Since ESPHome 2026.2.0 the ESP32 integration excludes unused built-in IDF
+# components (fatfs, spiffs, ...) from the build by default. This component
+# calls esp_vfs_fat_sdmmc_mount(), which lives in the built-in "fatfs"
+# component, so we must re-enable it. include_builtin_idf_component was
+# introduced together with that change; guard the import so the component keeps
+# working on older ESPHome versions where every built-in component is compiled.
+try:
+    from esphome.components.esp32 import include_builtin_idf_component
+except ImportError:  # ESPHome < 2026.2.0
+    include_builtin_idf_component = None
+
 CODEOWNERS = ["@youkorr"]
 
 CONF_SD_MMC_CARD_ID = "sd_mmc_card_id"
@@ -92,6 +103,10 @@ async def to_code(config):
     # e.g. "readdir is not implemented and will always fail" and the SD
     # directory operations silently fail at runtime. Force the options on.
     if CORE.using_esp_idf:
+        # Re-enable the built-in "fatfs" IDF component (excluded by default since
+        # ESPHome 2026.2.0); esp_vfs_fat_sdmmc_mount() won't link without it.
+        if include_builtin_idf_component is not None:
+            include_builtin_idf_component("fatfs")
         add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_IO", True)
         add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
 
