@@ -1101,6 +1101,9 @@ esp_err_t WebDAVBox3::handle_webdav_delete(httpd_req_t *req) {
 
   ESP_LOGD(TAG, "DELETE %s", path.c_str());
   
+  // ---> LIGNE AJOUTÉE POUR CORRIGER L'ERREUR CORS DANS LE NAVIGATEUR <---
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  
   // Vérifier si c'est un répertoire ou un fichier
   if (is_dir(path)) {
     // Supprimer le répertoire (doit être vide)
