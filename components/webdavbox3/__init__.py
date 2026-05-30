@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_USERNAME, CONF_PASSWORD, CONF_PORT
 
 CODEOWNERS = ["@youkorr"]
-DEPENDENCIES = ["sd_mmc_card"]
+#DEPENDENCIES = ["sd_mmc_card"]
 MULTI_CONF = False  # Si tu prévois un seul composant, sinon mets True si c'est une liste
 
 webdavbox_ns = cg.esphome_ns.namespace("webdavbox3")
