@@ -127,7 +127,8 @@ SD_MMC_WRITE_FILE_ACTION_SCHEMA = cv.Schema(
 ).extend(SD_MMC_PATH_ACTION_SCHEMA)
 
 @automation.register_action(
-    "sd_mmc_card.write_file", SdMmcWriteFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA
+    "sd_mmc_card.write_file", SdMmcWriteFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def sd_mmc_write_file_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -140,7 +141,8 @@ async def sd_mmc_write_file_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "sd_mmc_card.append_file", SdMmcAppendFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA
+    "sd_mmc_card.append_file", SdMmcAppendFileAction, SD_MMC_WRITE_FILE_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def sd_mmc_append_file_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -153,7 +155,8 @@ async def sd_mmc_append_file_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "sd_mmc_card.create_directory", SdMmcCreateDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA
+    "sd_mmc_card.create_directory", SdMmcCreateDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def sd_mmc_create_directory_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -164,7 +167,8 @@ async def sd_mmc_create_directory_to_code(config, action_id, template_arg, args)
 
 
 @automation.register_action(
-    "sd_mmc_card.remove_directory", SdMmcRemoveDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA
+    "sd_mmc_card.remove_directory", SdMmcRemoveDirectoryAction, SD_MMC_PATH_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def sd_mmc_remove_directory_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -175,7 +179,8 @@ async def sd_mmc_remove_directory_to_code(config, action_id, template_arg, args)
 
 
 @automation.register_action(
-    "sd_mmc_card.delete_file", SdMmcDeleteFileAction, SD_MMC_PATH_ACTION_SCHEMA
+    "sd_mmc_card.delete_file", SdMmcDeleteFileAction, SD_MMC_PATH_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def sd_mmc_delete_file_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
