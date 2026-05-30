@@ -17,13 +17,13 @@ from esphome.components.esp32 import add_idf_sdkconfig_option
 # Since ESPHome 2026.2.0 the ESP32 integration excludes unused built-in IDF
 # components (fatfs, spiffs, ...) from the build by default. This component
 # calls esp_vfs_fat_sdmmc_mount(), which lives in the built-in "fatfs"
-# component, so we must re-enable it. add_idf_component was introduced together
-# with that change; guard the import so the component keeps working on older
-# ESPHome versions where every built-in component is compiled anyway.
+# component, so we must re-enable it. include_builtin_idf_component was
+# introduced together with that change; guard the import so the component keeps
+# working on older ESPHome versions where every built-in component is compiled.
 try:
-    from esphome.components.esp32 import add_idf_component
+    from esphome.components.esp32 import include_builtin_idf_component
 except ImportError:  # ESPHome < 2026.2.0
-    add_idf_component = None
+    include_builtin_idf_component = None
 
 CODEOWNERS = ["@youkorr"]
 
@@ -105,8 +105,8 @@ async def to_code(config):
     if CORE.using_esp_idf:
         # Re-enable the built-in "fatfs" IDF component (excluded by default since
         # ESPHome 2026.2.0); esp_vfs_fat_sdmmc_mount() won't link without it.
-        if add_idf_component is not None:
-            add_idf_component(name="fatfs")
+        if include_builtin_idf_component is not None:
+            include_builtin_idf_component("fatfs")
         add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_IO", True)
         add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
 
