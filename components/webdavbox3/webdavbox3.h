@@ -6,11 +6,7 @@
 #include <vector>
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_defs.h"
-
-// Inclusion conditionnelle : uniquement si le composant sd_mmc_card est utilisé dans le YAML
-#ifdef USE_SD_MMC_CARD
 #include "../sd_mmc_card/sd_mmc_card.h"
-#endif
 
 #include "esp_vfs_fat.h"
 #include "esp_netif.h"
@@ -87,6 +83,21 @@ class WebDAVBox3 : public Component {
 
 }  // namespace webdavbox3
 }  // namespace esphome
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
