@@ -83,9 +83,14 @@ class StorageComponent : public Component {
 class SdImageComponent : public Component, public image::Image {
  public:
   // Constructeur CRITIQUE - doit initialiser la classe de base avec des données valides
-  SdImageComponent() : Component(), 
+  SdImageComponent() : Component(),
                        image::Image(nullptr, 0, 0, image::IMAGE_TYPE_RGB565, image::TRANSPARENCY_OPAQUE) {
     // Initialisation de base
+  }
+
+  // Destructeur CRITIQUE - Libère toute la mémoire PSRAM (image_buffer_ + gif_frames_)
+  ~SdImageComponent() {
+    unload_image();  // Garantit la libération de TOUTE la mémoire
   }
 
   // Component lifecycle
@@ -125,12 +130,36 @@ class SdImageComponent : public Component, public image::Image {
   // Status
   bool is_loaded() const { return this->image_loaded_; }
   const std::string &get_file_path() const { return this->file_path_; }
-  
+
   // CRITIQUE: Accès au buffer d'image pour LVGL
   const std::vector<uint8_t> &get_image_buffer() const { return this->image_buffer_; }
   uint8_t* get_image_data() { return this->image_buffer_.empty() ? nullptr : this->image_buffer_.data(); }
   size_t get_image_data_size() const { return this->image_buffer_.size(); }
-  
+
+  // GIF Animation control
+  bool is_animated() const { return this->is_gif_animated_; }
+  size_t get_frame_count() const { return this->gif_frames_.size(); }
+  size_t get_current_frame() const { return this->current_gif_frame_; }
+  void set_frame(size_t frame_index);
+  void next_frame();
+  void prev_frame();
+  uint16_t get_frame_delay() const;
+
+  // LVGL Canvas drawing support
+  #ifdef USE_LVGL
+  // Draw current frame directly to an LVGL canvas
+  // canvas: pointer to lv_obj_t canvas widget
+  // x, y: position on canvas to draw
+  void draw_to_canvas(lv_obj_t *canvas, int x = 0, int y = 0);
+
+  // Update canvas with current animation frame (call this in interval)
+  // Returns true if frame was updated
+  bool update_canvas_animation(lv_obj_t *canvas, int x = 0, int y = 0);
+
+  // Clear canvas area with background color (for transparency support)
+  void clear_canvas_area(lv_obj_t *canvas, int x = 0, int y = 0);
+  #endif
+
   // Debug info
   std::string get_debug_info() const;
 
@@ -141,13 +170,31 @@ class SdImageComponent : public Component, public image::Image {
   std::vector<uint8_t> image_buffer_;
   bool image_loaded_{false};
   bool auto_load_{true};
-  
+
   // Image properties - locales
   int image_width_{0};
   int image_height_{0};
   int resize_width_{0};
   int resize_height_{0};
   ImageFormat format_{ImageFormat::RGB565};
+
+  // GIF animation support
+  struct GifFrame {
+    std::vector<uint8_t> pixels;       // RGB565 pixel data for this frame
+    std::vector<bool> transparency;    // Per-pixel transparency mask (true = transparent)
+    uint16_t delay_ms;                 // Delay before next frame in milliseconds
+    uint16_t left, top;                // Frame position
+    uint16_t width, height;            // Frame dimensions
+    uint8_t disposal_method;           // How to dispose of frame (0-3)
+    bool has_transparency;             // Whether this frame has any transparent pixels
+  };
+  std::vector<GifFrame> gif_frames_;
+  size_t current_gif_frame_{0};
+  bool is_gif_animated_{false};
+  uint32_t last_frame_time_{0};
+
+  static const size_t MAX_GIF_FRAMES = 60;   // Limit to prevent memory exhaustion (60 frames @ 128x128 = ~2MB)
+  static const size_t MAX_GIF_MEMORY_MB = 4;  // Maximum memory for GIF frames in MB
 
  private:
   // Retry logic for image loading
@@ -158,15 +205,32 @@ class SdImageComponent : public Component, public image::Image {
   // File type detection
   enum class FileType {
     UNKNOWN,
-    JPEG
+    JPEG,
+    GIF,
+    PNG,      // Supported via LV_USE_LIBPNG (lvgl_advanced_features)
+    BMP,      // Supported via LV_USE_BMP (lvgl_advanced_features)
+    SVG,      // Supported via LV_USE_SVG (lvgl_advanced_features, LVGL v9)
+    LOTTIE    // Supported via LV_USE_LOTTIE (lvgl_advanced_features, LVGL v9)
   };
-  
+
   FileType detect_file_type(const std::vector<uint8_t> &data) const;
   bool is_jpeg_data(const std::vector<uint8_t> &data) const;
-  
-  // Image decoding - JPEG only for now
+  bool is_gif_data(const std::vector<uint8_t> &data) const;
+  bool is_png_data(const std::vector<uint8_t> &data) const;
+  bool is_bmp_data(const std::vector<uint8_t> &data) const;
+  bool is_svg_data(const std::vector<uint8_t> &data) const;
+  bool is_lottie_data(const std::vector<uint8_t> &data) const;
+
+  // Image decoding - JPEG and GIF (built-in)
   bool decode_image(const std::vector<uint8_t> &data);
   bool decode_jpeg_image(const std::vector<uint8_t> &jpeg_data);
+  bool decode_gif_image(const std::vector<uint8_t> &gif_data);
+
+  // Image decoding - PNG, BMP, SVG, Lottie (via LVGL decoders)
+  bool decode_png_image(const std::vector<uint8_t> &png_data);
+  bool decode_bmp_image(const std::vector<uint8_t> &bmp_data);
+  bool decode_svg_image(const std::vector<uint8_t> &svg_data);
+  bool decode_lottie_image(const std::vector<uint8_t> &lottie_data);
   
   // JPEG decoder callbacks
 #ifdef USE_JPEGDEC
@@ -246,6 +310,18 @@ class SdImageUnloadAction : public Action<Ts...> {
 
 }  // namespace storage
 }  // namespace esphome
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
