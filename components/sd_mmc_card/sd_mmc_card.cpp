@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstdio>
+#include <sys/stat.h>
 
 #include "math.h"
 #include "esphome/core/log.h"
@@ -14,6 +15,9 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_types.h"
+#include "sd_pwr_ctrl_by_on_chip_ldo.h"
+#include <dirent.h>
+#include <errno.h>
 
 int constexpr SD_OCR_SDHC_CAP = (1 << 30);  // value defined in esp-idf/components/sdmmc/include/sd_protocol_defs.h
 #endif
@@ -24,28 +28,10 @@ namespace sd_mmc_card {
 static const char *TAG = "sd_mmc_card";
 
 #ifdef USE_ESP_IDF
-// Maximum length of a FAT long file name (255 characters + null terminator).
-// Note: CONFIG_SPIFFS_OBJ_NAME_LEN was previously used here, but it is only
-// defined when the SPIFFS component is enabled in ESP-IDF. As this component
-// uses a FAT filesystem, rely on a fixed constant instead.
-static constexpr size_t MAX_FILE_NAME_LEN = 256;
-static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + MAX_FILE_NAME_LEN;
+static const size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + 256;
 static const std::string MOUNT_POINT("/sdcard");
 
-//std::string build_path(const char *path) { return MOUNT_POINT + path; }
-std::string build_path(const char *path_cstr) {
-  std::string p = path_cstr ? std::string(path_cstr) : std::string();
-
-  if (p.empty()) return MOUNT_POINT;                 // "/sdcard"
-
-  // Si le chemin commence déjà par le point de montage, le renvoyer tel quel
-  if (p.rfind(MOUNT_POINT, 0) == 0) return p;        // "/sdcard/..."
-
-  // S'assurer qu'il y a un slash au début
-  if (p.front() != '/') p.insert(p.begin(), '/');    // "foo" -> "/foo"
-
-  return MOUNT_POINT + p;                            // "/sdcard/foo"
-}
+std::string build_path(const char *path) { return MOUNT_POINT + path; }
 #endif
 
 #ifdef USE_SENSOR
@@ -57,6 +43,7 @@ void SdMmc::loop() {}
 void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "SD MMC Component");
   ESP_LOGCONFIG(TAG, "  Mode 1 bit: %s", TRUEFALSE(this->mode_1bit_));
+  ESP_LOGCONFIG(TAG, "  Slot: %d", this->slot_); 
   ESP_LOGCONFIG(TAG, "  CLK Pin: %d", this->clk_pin_);
   ESP_LOGCONFIG(TAG, "  CMD Pin: %d", this->cmd_pin_);
   ESP_LOGCONFIG(TAG, "  DATA0 Pin: %d", this->data0_pin_);
@@ -97,36 +84,34 @@ void SdMmc::dump_config() {
 #ifdef USE_ESP_IDF
 
 void SdMmc::setup() {
-  // Power control
+  // Étape 1 : Configuration du contrôle d'alimentation (GPIO45)
   if (this->power_ctrl_pin_ != nullptr) {
-    this->power_ctrl_pin_->setup();
+    this->power_ctrl_pin_->setup();  // Configure GPIO45 en sortie
+    this->power_ctrl_pin_->digital_write(true);  // Active l'alimentation (met GPIO45 à HIGH)
+    ESP_LOGI(TAG, "Power control pin activated.");
+    vTaskDelay(pdMS_TO_TICKS(100));  // Attends 100 ms pour stabiliser l'alimentation
+  } else {
+    ESP_LOGD(TAG, "No power control pin defined (SD card always powered)");
   }
-  
-  // Configuration optimale
+
+  // Étape 2 : Configuration optimale pour le montage de la carte SD
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
     .format_if_mount_failed = false,
-    .max_files = 16,
-    .allocation_unit_size = 256 * 1024  // 64KB optimise l'écriture des fichiers
+    .max_files = 64,  // (32) Augmenté pour améliorer les performances (was 16)
+    .allocation_unit_size = 64 * 1024  // 64KB optimisé pour la vidéo (was 256KB)
+                                       // Réduit le gaspillage d'espace et améliore les performances
+                                       // pour les écritures séquentielles de frames vidéo
   };
-  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-  host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 50MHz
-  //host.max_freq_khz = 60000; // ou 50000
 
-  
-  // Dans les versions récentes d'ESP-IDF, DMA est généralement activé par défaut
-  // ou configuré différemment, donc on n'ajoute pas SDMMC_HOST_FLAG_DMA
-  
-  // Activer DDR seulement en mode 4 bits
-  if (!this->mode_1bit_) {
-    host.flags |= SDMMC_HOST_FLAG_DDR;
-  } else {
-    host.flags &= ~SDMMC_HOST_FLAG_DDR;
-  }
-  
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  host.slot = SDMMC_HOST_SLOT_0 + this->slot_;  // Utilise le slot configuré
+  host.max_freq_khz = SDMMC_FREQ_52M;  // 52MHz (au lieu de SDMMC_FREQ_HIGHSPEED 40MHz)
+                                        // Gain: +30% de vitesse théorique sur cartes compatibles
+
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
   slot_config.width = this->mode_1bit_ ? 1 : 4;
-  
-  // Configuration des pins
+
+  // Configuration des pins seulement si on utilise GPIO matrix
   #ifdef SOC_SDMMC_USE_GPIO_MATRIX
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
@@ -137,70 +122,62 @@ void SdMmc::setup() {
     slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
   }
   #endif
-  // Enable internal pullups
+
+  // Activation des pull-ups internes
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-  
-  // Try to mount with optimized retry logic
+
+  // Initialiser le slot spécifique avant le montage
+  ESP_LOGI(TAG, "Initializing SDMMC slot %d", this->slot_);
+  esp_err_t slot_init = sdmmc_host_init_slot(host.slot, &slot_config);
+  if (slot_init != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize slot %d: %s", this->slot_, esp_err_to_name(slot_init));
+    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
+    mark_failed();
+    return;
+  }
+
+  // Tentative de montage avec logique de réessai
   esp_err_t ret = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
-    ESP_LOGI(TAG, "Mounting SD Card (attempt %d/3)...", attempt);
+    ESP_LOGI(TAG, "Mounting SD Card on slot %d (attempt %d/3)...", this->slot_, attempt);
     ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
     if (ret == ESP_OK) {
-      ESP_LOGI(TAG, "SD Card mounted successfully!");
+      ESP_LOGI(TAG, "SD Card mounted successfully on slot %d!", this->slot_);
       break;
     }
+    ESP_LOGD(TAG, "Mount attempt %d failed: %s (will retry)", attempt, esp_err_to_name(ret));
     vTaskDelay(pdMS_TO_TICKS(100));  // Pause entre tentatives
   }
+
   if (ret != ESP_OK) {
     if (ret == ESP_FAIL) {
       this->init_error_ = ErrorCode::ERR_MOUNT;
-      ESP_LOGE(TAG, "Failed to mount filesystem on SD card");
+      ESP_LOGE(TAG, "Failed to mount filesystem on SD card (slot %d)", this->slot_);
     } else {
       this->init_error_ = ErrorCode::ERR_NO_CARD;
-      ESP_LOGE(TAG, "No SD card detected");
+      ESP_LOGE(TAG, "No SD card detected on slot %d", this->slot_);
     }
     mark_failed();
     return;
   }
+
   // Diagnostic de la carte
-  ESP_LOGI(TAG, "SD Card Info:");
+  ESP_LOGI(TAG, "SD Card Info (slot %d):", this->slot_);
   ESP_LOGI(TAG, "  Name: %s", this->card_->cid.name);
   ESP_LOGI(TAG, "  Type: %s", sd_card_type().c_str());
-  ESP_LOGI(TAG, "  Speed: %d kHz (max: %d kHz)", this->card_->max_freq_khz, SDMMC_FREQ_HIGHSPEED);
+  ESP_LOGI(TAG, "  Speed: %d kHz (requested: %d kHz)", this->card_->real_freq_khz, SDMMC_FREQ_52M);
+  ESP_LOGI(TAG, "  Bus width: %d-bit", this->mode_1bit_ ? 1 : 4);
+  ESP_LOGI(TAG, "  DDR mode: %s", this->card_->is_ddr ? "YES" : "NO");
   ESP_LOGI(TAG, "  Size: %llu MB", ((uint64_t)this->card_->csd.capacity * this->card_->csd.sector_size) / (1024 * 1024));
-  
-  #ifdef USE_TEXT_SENSOR
-  if (this->sd_card_type_text_sensor_ != nullptr)
-    this->sd_card_type_text_sensor_->publish_state(sd_card_type());
-  #endif
+
+  // Performance diagnostic
+  float theoretical_speed_mbps = (this->card_->real_freq_khz / 1000.0) * (this->mode_1bit_ ? 1 : 4) / 8.0;
+  if (this->card_->is_ddr) {
+    theoretical_speed_mbps *= 2;  // DDR doubles the data rate
+  }
+  ESP_LOGI(TAG, "  Theoretical max speed: %.1f MB/s", theoretical_speed_mbps);
+
   update_sensors();
-}
-#endif
-void SdMmc::write_file(const char *path, const uint8_t *buffer, size_t len) {
-  ESP_LOGV(TAG, "Writing to file: %s", path);
-  this->write_file(path, buffer, len, "w");
-}
-
-void SdMmc::append_file(const char *path, const uint8_t *buffer, size_t len) {
-  ESP_LOGV(TAG, "Appending to file: %s", path);
-  this->write_file(path, buffer, len, "a");
-}
-
-#ifdef USE_ESP_IDF
-void SdMmc::write_file(const char *path, const uint8_t *buffer, size_t len, const char *mode) {
-  std::string absolut_path = build_path(path);
-  FILE *file = NULL;
-  file = fopen(absolut_path.c_str(), mode);
-  if (file == NULL) {
-    ESP_LOGE(TAG, "Failed to open file for writing");
-    return;
-  }
-  bool ok = fwrite(buffer, 1, len, file);
-  if (!ok) {
-    ESP_LOGE(TAG, "Failed to write to file");
-  }
-  fclose(file);
-  this->update_sensors();
 }
 
 void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t len, size_t chunk_size) {
@@ -221,9 +198,62 @@ void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t l
       break;
     }
     written += to_write;
+
+    // CRITIQUE: Forcer l'écriture immédiate sur la carte SD après chaque chunk
+    // Sans cela, les données restent dans le buffer RAM et peuvent être perdues
+    // lors de l'enregistrement vidéo à haute fréquence
+    fflush(file);
   }
   fclose(file);
   this->update_sensors();
+}
+
+// Fonction optimisée pour l'écriture de frames vidéo
+// Paramètres:
+//   - path: chemin du fichier
+//   - buffer: buffer contenant la frame vidéo
+//   - len: taille de la frame
+//   - force_sync: si true, force l'écriture sur disque avec fsync() (par défaut true)
+//
+// Cette fonction est optimisée pour le streaming vidéo:
+// - Utilise fflush() pour vider le buffer stdio
+// - Utilise fsync() pour garantir l'écriture sur le disque physique
+// - Évite les pertes de frames lors de l'enregistrement vidéo
+void SdMmc::write_file_video(const char *path, const uint8_t *buffer, size_t len, bool force_sync) {
+  std::string absolut_path = build_path(path);
+  FILE *file = fopen(absolut_path.c_str(), "ab");  // Mode append binaire
+  if (file == NULL) {
+    ESP_LOGE(TAG, "Failed to open video file for writing: %s (errno=%d)", path, errno);
+    return;
+  }
+
+  // Écriture de la frame complète
+  size_t written = fwrite(buffer, 1, len, file);
+  if (written != len) {
+    ESP_LOGE(TAG, "Video write incomplete: wrote %zu/%zu bytes", written, len);
+    fclose(file);
+    return;
+  }
+
+  // Forcer l'écriture du buffer stdio vers le kernel
+  if (fflush(file) != 0) {
+    ESP_LOGE(TAG, "Video fflush failed: errno=%d", errno);
+  }
+
+  // Si force_sync est activé, forcer l'écriture sur le disque physique
+  // ATTENTION: fsync() peut ralentir les écritures mais garantit la persistance des données
+  // Pour vidéo haute résolution/framerate, vous pouvez désactiver force_sync
+  if (force_sync) {
+    int fd = fileno(file);
+    if (fd >= 0) {
+      if (fsync(fd) != 0) {
+        ESP_LOGW(TAG, "Video fsync failed: errno=%d (data may be cached)", errno);
+      }
+    }
+  }
+
+  fclose(file);
+  // Ne pas appeler update_sensors() à chaque frame pour éviter la surcharge
 }
 #else
 void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t len, size_t chunk_size) {
@@ -240,14 +270,9 @@ void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t l
 std::vector<std::string> SdMmc::list_directory(const char *path, uint8_t depth) {
   std::vector<std::string> list;
   std::vector<FileInfo> infos = list_directory_file_info(path, depth);
-
-  list.reserve(infos.size());
-  std::transform(infos.cbegin(), infos.cend(), std::back_inserter(list),
-                 [](FileInfo const &info) { return info.path; });
-
+  std::transform(infos.cbegin(), infos.cend(), list.begin(), [](FileInfo const &info) { return info.path; });
   return list;
 }
-
 
 std::vector<std::string> SdMmc::list_directory(std::string path, uint8_t depth) {
   return this->list_directory(path.c_str(), depth);
@@ -267,38 +292,36 @@ std::vector<FileInfo> SdMmc::list_directory_file_info(std::string path, uint8_t 
 std::vector<FileInfo> &SdMmc::list_directory_file_info_rec(const char *path, uint8_t depth,
                                                            std::vector<FileInfo> &list) {
   ESP_LOGV(TAG, "Listing directory file info: %s\n", path);
-  std::string absolut_path = build_path(path);
-  DIR *dir = opendir(absolut_path.c_str());
-  if (!dir) {
-    ESP_LOGE(TAG, "Failed to open directory: %s", strerror(errno));
+  std::string vfs_path = build_path(path);
+
+  DIR *dir = opendir(vfs_path.c_str());
+  if (dir == nullptr) {
+    ESP_LOGE(TAG, "Failed to open directory: %s (errno %d)", vfs_path.c_str(), errno);
     return list;
   }
-  char entry_absolut_path[FILE_PATH_MAX];
-  char entry_path[FILE_PATH_MAX];
-  const size_t dirpath_len = MOUNT_POINT.size();
-  size_t entry_path_len = strlen(path);
-  strlcpy(entry_path, path, sizeof(entry_path));
-  strlcpy(entry_path + entry_path_len, "/", sizeof(entry_path) - entry_path_len);
-  entry_path_len = strlen(entry_path);
 
-  strlcpy(entry_absolut_path, MOUNT_POINT.c_str(), sizeof(entry_absolut_path));
+  char entry_path[FILE_PATH_MAX];
+  size_t path_len = strlen(path);
+  strlcpy(entry_path, path, sizeof(entry_path));
+  strlcpy(entry_path + path_len, "/", sizeof(entry_path) - path_len);
+  path_len = strlen(entry_path);
+
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
-    size_t file_size = 0;
-    strlcpy(entry_path + entry_path_len, entry->d_name, sizeof(entry_path) - entry_path_len);
-    strlcpy(entry_absolut_path + dirpath_len, entry_path, sizeof(entry_absolut_path) - dirpath_len);
-    if (entry->d_type != DT_DIR) {
-      struct stat info;
-      if (stat(entry_absolut_path, &info) < 0) {
-        ESP_LOGE(TAG, "Failed to stat file: %s '%s' %s", strerror(errno), entry->d_name, entry_absolut_path);
-      } else {
-        file_size = info.st_size;
-      }
-    }
-    list.emplace_back(entry_path, file_size, entry->d_type == DT_DIR);
-    if (entry->d_type == DT_DIR && depth)
-      list_directory_file_info_rec(entry_path, depth - 1, list);
+    strlcpy(entry_path + path_len, entry->d_name, sizeof(entry_path) - path_len);
 
+    std::string entry_vfs_path = build_path(entry_path);
+    struct stat st;
+    if (stat(entry_vfs_path.c_str(), &st) != 0) {
+      continue;
+    }
+
+    bool is_dir = S_ISDIR(st.st_mode);
+    size_t file_size = is_dir ? 0 : st.st_size;
+
+    list.emplace_back(entry_path, file_size, is_dir);
+    if (is_dir && depth)
+      list_directory_file_info_rec(entry_path, depth - 1, list);
   }
   closedir(dir);
   return list;
@@ -306,11 +329,11 @@ std::vector<FileInfo> &SdMmc::list_directory_file_info_rec(const char *path, uin
 
 bool SdMmc::is_directory(const char *path) {
   std::string absolut_path = build_path(path);
-  DIR *dir = opendir(absolut_path.c_str());
-  if (dir) {
-    closedir(dir);
+  struct stat st;
+  if (stat(absolut_path.c_str(), &st) == 0) {
+    return S_ISDIR(st.st_mode);
   }
-  return dir != nullptr;
+  return false;
 }
 
 size_t SdMmc::file_size(const char *path) {
@@ -340,17 +363,12 @@ void SdMmc::update_sensors() {
   if (this->card_ == nullptr)
     return;
 
-  FATFS *fs;
-  DWORD fre_clust, fre_sect, tot_sect;
-  uint64_t total_bytes = -1, free_bytes = -1, used_bytes = -1;
-  auto res = f_getfree(MOUNT_POINT.c_str(), &fre_clust, &fs);
-  if (!res) {
-    tot_sect = (fs->n_fatent - 2) * fs->csize;
-    fre_sect = fre_clust * fs->csize;
-
-    total_bytes = static_cast<uint64_t>(tot_sect) * FF_SS_SDCARD;
-    free_bytes = static_cast<uint64_t>(fre_sect) * FF_SS_SDCARD;
+  uint64_t total_bytes = 0, free_bytes = 0, used_bytes = 0;
+  esp_err_t ret = esp_vfs_fat_info(MOUNT_POINT.c_str(), &total_bytes, &free_bytes);
+  if (ret == ESP_OK) {
     used_bytes = total_bytes - free_bytes;
+  } else {
+    ESP_LOGE(TAG, "Failed to get filesystem info: %s", esp_err_to_name(ret));
   }
 
   if (this->used_space_sensor_ != nullptr)
@@ -479,6 +497,64 @@ void SdMmc::read_file_stream(const char *path, size_t offset, size_t chunk_size,
   }
 }
 
+// Fonction optimisée pour la lecture de fichiers vidéo
+// Cette fonction est un wrapper simplifié de read_file_stream() pour les cas d'usage courants
+//
+// Paramètres:
+//   - path: chemin du fichier vidéo
+//   - max_size: taille maximale à lire (0 = lire le fichier complet)
+//
+// Avantages par rapport à read_file():
+// - Pas de limite de 5MB
+// - Reset du watchdog automatique pour éviter les timeouts
+// - Optimisé pour les gros fichiers vidéo (300+ Mo)
+//
+// Note: Pour les très gros fichiers (>500 Mo), préférez utiliser read_file_stream()
+// directement avec un callback pour éviter d'allouer trop de mémoire d'un coup
+std::vector<uint8_t> SdMmc::read_file_video(const char *path, size_t max_size) {
+  // Vérifier la taille du fichier
+  size_t file_size = this->file_size(path);
+  if (file_size == 0) {
+    ESP_LOGE(TAG, "File not found or empty: %s", path);
+    return {};
+  }
+
+  // Si max_size est spécifié, limiter la lecture
+  size_t bytes_to_read = (max_size > 0 && max_size < file_size) ? max_size : file_size;
+
+  // Vérification de mémoire disponible
+  size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  if (bytes_to_read > free_heap / 2) {
+    ESP_LOGE(TAG, "Not enough memory to read video file: need %zu bytes, only %zu available",
+             bytes_to_read, free_heap);
+    ESP_LOGE(TAG, "Use read_file_stream() with callback for large files");
+    return {};
+  }
+
+  ESP_LOGI(TAG, "Reading video file: %s (%zu bytes)", path, bytes_to_read);
+
+  // Préparer le buffer de sortie
+  std::vector<uint8_t> result;
+  result.reserve(bytes_to_read);
+
+  // Utiliser read_file_stream avec un callback qui accumule les données
+  size_t bytes_read = 0;
+  this->read_file_stream(path, 0, 32 * 1024, [&](const uint8_t* data, size_t len) {
+    // Limiter au max_size si spécifié
+    size_t to_append = len;
+    if (max_size > 0 && bytes_read + len > max_size) {
+      to_append = max_size - bytes_read;
+    }
+
+    if (to_append > 0) {
+      result.insert(result.end(), data, data + to_append);
+      bytes_read += to_append;
+    }
+  });
+
+  ESP_LOGI(TAG, "Video file read complete: %zu bytes", result.size());
+  return result;
+}
 
 #endif
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
@@ -537,6 +613,9 @@ FileInfo::FileInfo(std::string const &path, size_t size, bool is_directory)
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
+
+
 
 
 
